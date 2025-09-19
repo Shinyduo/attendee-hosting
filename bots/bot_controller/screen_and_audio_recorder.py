@@ -1,6 +1,8 @@
 import logging
 import os
 import subprocess
+import time
+import tempfile
 
 logger = logging.getLogger(__name__)
 
@@ -15,9 +17,26 @@ class ScreenAndAudioRecorder:
         self.audio_only = audio_only
         self.paused = False
         self.xterm_proc = None
+        self.ffmpeg_log_file = None
+        self.recording_started_time = None
+
+    def __del__(self):
+        """Ensure ffmpeg process is cleaned up on object destruction"""
+        try:
+            if self.ffmpeg_proc and self.ffmpeg_proc.poll() is None:
+                logger.warning("FFmpeg process still running during cleanup, terminating")
+                self.stop_recording()
+        except:
+            pass  # Ignore errors during cleanup
 
     def start_recording(self, display_var):
         logger.info(f"Starting screen recorder for display {display_var} with dimensions {self.screen_dimensions} and file location {self.file_location}")
+        
+        # Create a log file for ffmpeg output to help with debugging
+        if self.file_location:
+            log_dir = os.path.dirname(self.file_location)
+            log_filename = f"ffmpeg_{os.path.basename(self.file_location)}.log"
+            self.ffmpeg_log_file = os.path.join(log_dir, log_filename)
 
         if self.audio_only:
             # FFmpeg command for audio-only recording to MP3
@@ -44,7 +63,50 @@ class ScreenAndAudioRecorder:
             ffmpeg_cmd = ["ffmpeg", "-y", "-thread_queue_size", "4096", "-framerate", "30", "-video_size", f"{self.screen_dimensions[0]}x{self.screen_dimensions[1]}", "-f", "x11grab", "-draw_mouse", "0", "-probesize", "32", "-i", display_var, "-thread_queue_size", "4096", "-f", "alsa", "-i", "default", "-vf", f"crop={self.recording_dimensions[0]}:{self.recording_dimensions[1]}:10:10", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", "30", "-c:a", "aac", "-strict", "experimental", "-b:a", "128k", self.file_location]
 
         logger.info(f"Starting FFmpeg command: {' '.join(ffmpeg_cmd)}")
-        self.ffmpeg_proc = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+        
+        # Open log file for ffmpeg output
+        log_file_handle = None
+        if self.ffmpeg_log_file:
+            try:
+                log_file_handle = open(self.ffmpeg_log_file, 'w')
+                logger.info(f"FFmpeg output will be logged to: {self.ffmpeg_log_file}")
+            except Exception as e:
+                logger.warning(f"Could not create ffmpeg log file {self.ffmpeg_log_file}: {e}")
+        
+        # Start ffmpeg with proper error handling
+        try:
+            self.ffmpeg_proc = subprocess.Popen(
+                ffmpeg_cmd, 
+                stdout=log_file_handle if log_file_handle else subprocess.DEVNULL, 
+                stderr=subprocess.STDOUT if log_file_handle else subprocess.DEVNULL
+            )
+            self.recording_started_time = time.time()
+            logger.info(f"FFmpeg process started with PID: {self.ffmpeg_proc.pid}")
+            
+            # Give ffmpeg a moment to initialize
+            time.sleep(1)
+            
+            # Check if process is still running after initialization
+            if self.ffmpeg_proc.poll() is not None:
+                logger.error(f"FFmpeg process exited immediately with return code: {self.ffmpeg_proc.returncode}")
+                if self.ffmpeg_log_file and os.path.exists(self.ffmpeg_log_file):
+                    try:
+                        with open(self.ffmpeg_log_file, 'r') as f:
+                            error_output = f.read()
+                            logger.error(f"FFmpeg error output: {error_output}")
+                    except Exception as e:
+                        logger.error(f"Could not read ffmpeg log file: {e}")
+            else:
+                logger.info("FFmpeg process started successfully")
+                
+        except Exception as e:
+            logger.error(f"Failed to start FFmpeg process: {e}")
+            if log_file_handle:
+                log_file_handle.close()
+            raise
+        finally:
+            if log_file_handle:
+                log_file_handle.close()
 
     # Pauses by muting the audio and showing a black xterm covering the entire screen
     def pause_recording(self):
@@ -84,10 +146,71 @@ class ScreenAndAudioRecorder:
     def stop_recording(self):
         if not self.ffmpeg_proc:
             return
-        self.ffmpeg_proc.terminate()
-        self.ffmpeg_proc.wait()
-        self.ffmpeg_proc = None
+            
+        logger.info(f"Stopping FFmpeg process (PID: {self.ffmpeg_proc.pid})")
+        
+        try:
+            # First try graceful termination
+            self.ffmpeg_proc.terminate()
+            
+            # Wait up to 5 seconds for graceful shutdown
+            try:
+                self.ffmpeg_proc.wait(timeout=5)
+                logger.info("FFmpeg process terminated gracefully")
+            except subprocess.TimeoutExpired:
+                logger.warning("FFmpeg process did not terminate gracefully, forcing kill")
+                self.ffmpeg_proc.kill()
+                self.ffmpeg_proc.wait()
+                
+        except Exception as e:
+            logger.error(f"Error stopping FFmpeg process: {e}")
+            try:
+                self.ffmpeg_proc.kill()
+                self.ffmpeg_proc.wait()
+            except:
+                pass
+        
+        finally:
+            self.ffmpeg_proc = None
+            
+        # Log recording duration and check file creation
+        if self.recording_started_time:
+            duration = time.time() - self.recording_started_time
+            logger.info(f"Recording duration: {duration:.2f} seconds")
+            
+        if self.file_location and os.path.exists(self.file_location):
+            file_size = os.path.getsize(self.file_location)
+            logger.info(f"Recording file created: {self.file_location} ({file_size} bytes)")
+        else:
+            logger.warning(f"Recording file not found or empty: {self.file_location}")
+            
         logger.info(f"Stopped screen and audio recorder for display with dimensions {self.screen_dimensions} and file location {self.file_location}")
+
+    def check_recording_health(self):
+        """Check if recording is healthy by monitoring file size and process status"""
+        if not self.ffmpeg_proc:
+            return False, "FFmpeg process not running"
+            
+        # Check if process is still alive
+        if self.ffmpeg_proc.poll() is not None:
+            return False, f"FFmpeg process exited with code {self.ffmpeg_proc.returncode}"
+            
+        # Check if file exists and is growing
+        if self.file_location and os.path.exists(self.file_location):
+            file_size = os.path.getsize(self.file_location)
+            duration = time.time() - self.recording_started_time if self.recording_started_time else 0
+            
+            # For recordings longer than 10 seconds, expect at least some data
+            if duration > 10 and file_size == 0:
+                return False, f"No data written after {duration:.1f} seconds"
+                
+            return True, f"Recording healthy: {file_size} bytes after {duration:.1f}s"
+        else:
+            duration = time.time() - self.recording_started_time if self.recording_started_time else 0
+            # Allow some time for file creation
+            if duration > 5:
+                return False, f"Recording file not created after {duration:.1f} seconds"
+            return True, "Recording starting up"
 
     def get_seekable_path(self, path):
         """
@@ -104,20 +227,72 @@ class ScreenAndAudioRecorder:
         if input_path is None:
             return
 
+        # Clean up ffmpeg log file if it exists
+        if self.ffmpeg_log_file and os.path.exists(self.ffmpeg_log_file):
+            try:
+                # Log any final ffmpeg output before cleanup
+                with open(self.ffmpeg_log_file, 'r') as f:
+                    log_content = f.read().strip()
+                    if log_content:
+                        logger.info(f"Final FFmpeg log output: {log_content}")
+                os.remove(self.ffmpeg_log_file)
+                logger.info(f"Cleaned up FFmpeg log file: {self.ffmpeg_log_file}")
+            except Exception as e:
+                logger.warning(f"Could not clean up FFmpeg log file {self.ffmpeg_log_file}: {e}")
+
         # Check if input file exists
         if not os.path.exists(input_path):
-            logger.info(f"Input file does not exist at {input_path}, creating empty file")
-            with open(input_path, "wb"):
-                pass  # Create empty file
+            logger.warning(f"Input file does not exist at {input_path}")
+            
+            # Instead of creating an empty file, check if ffmpeg was killed unexpectedly
+            if self.recording_started_time:
+                duration = time.time() - self.recording_started_time
+                logger.error(f"Recording was expected to run for {duration:.2f} seconds but no file was created")
+                
+                # Check for partial/temporary files that might exist
+                temp_patterns = [
+                    input_path + ".tmp",
+                    input_path + ".part", 
+                    input_path + "~"
+                ]
+                
+                for temp_path in temp_patterns:
+                    if os.path.exists(temp_path):
+                        logger.info(f"Found partial recording file: {temp_path}")
+                        try:
+                            os.rename(temp_path, input_path)
+                            logger.info(f"Recovered partial recording: {temp_path} -> {input_path}")
+                            break
+                        except Exception as e:
+                            logger.error(f"Could not recover partial recording {temp_path}: {e}")
+                
+                # If still no file, create empty one as last resort
+                if not os.path.exists(input_path):
+                    logger.info(f"Creating empty file as fallback: {input_path}")
+                    with open(input_path, "wb"):
+                        pass  # Create empty file
+            else:
+                logger.info(f"Creating empty file: {input_path}")
+                with open(input_path, "wb"):
+                    pass  # Create empty file
             return
+
+        # Log file size for debugging
+        file_size = os.path.getsize(input_path)
+        logger.info(f"Processing recording file: {input_path} ({file_size} bytes)")
 
         # if audio only, we don't need to make it seekable
         if self.audio_only:
             return
 
         # if input file is greater than 3 GB, we will skip seekability
-        if os.path.getsize(input_path) > 3 * 1024 * 1024 * 1024:
+        if file_size > 3 * 1024 * 1024 * 1024:
             logger.info("Input file is greater than 3 GB, skipping seekability")
+            return
+            
+        # if file is too small (less than 1KB), skip seekability processing
+        if file_size < 1024:
+            logger.warning(f"Input file is very small ({file_size} bytes), skipping seekability processing")
             return
 
         output_path = self.get_seekable_path(self.file_location)

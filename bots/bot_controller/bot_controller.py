@@ -420,6 +420,15 @@ class BotController:
             self.main_loop.quit()
 
         if self.screen_and_audio_recorder:
+            # Check recording health before cleanup
+            try:
+                health_ok, health_msg = self.screen_and_audio_recorder.check_recording_health()
+                logger.info(f"Recording health check: {health_msg}")
+                if not health_ok:
+                    logger.warning(f"Recording health issue detected: {health_msg}")
+            except Exception as e:
+                logger.error(f"Error checking recording health: {e}")
+                
             logger.info("Telling media recorder receiver to cleanup...")
             self.screen_and_audio_recorder.cleanup()
 
