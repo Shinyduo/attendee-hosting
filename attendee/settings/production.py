@@ -1,6 +1,6 @@
 import os
 
-import dj_database_url
+import dj_database_url  # type: ignore
 
 from .base import *
 

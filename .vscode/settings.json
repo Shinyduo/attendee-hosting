@@ -1,0 +1,7 @@
+{
+    "python.analysis.extraPaths": [
+        "${workspaceFolder}/stubs"
+    ],
+    "python.linting.pylintEnabled": true,
+    "python.linting.enabled": true
+}
