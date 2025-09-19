@@ -36,7 +36,7 @@ EMAIL_HOST_USER = "resend"  # As shown in your screenshot
 EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD")
 EMAIL_PORT = 587
 EMAIL_USE_TLS = True
-DEFAULT_FROM_EMAIL = "noreply@mail.attendee.dev"
+DEFAULT_FROM_EMAIL = "noreply@arali.ai"
 
 ADMINS = []
 
