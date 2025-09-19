@@ -201,21 +201,73 @@ SPECTACULAR_SETTINGS = {
 }
 # publish with python manage.py spectacular --color --file docs/openapi.yml
 
-STORAGES = {
-    "default": {
-        "BACKEND": "storages.backends.s3.S3Storage",
-        "OPTIONS": {
-            "endpoint_url": os.getenv("AWS_ENDPOINT_URL"),
-            "access_key": os.getenv("AWS_ACCESS_KEY_ID"),
-            "secret_key": os.getenv("AWS_SECRET_ACCESS_KEY"),
+# Select the storage backend based on environment variable
+STORAGE_TYPE = os.getenv("STORAGE_TYPE", "s3")  # Default to S3 for backward compatibility
+
+if STORAGE_TYPE == "gcs":
+    # Google Cloud Storage configuration
+    import json
+    from google.oauth2 import service_account
+
+    # Handle credentials - either from a file path or JSON string in env var
+    gcp_credentials = None
+    gcp_credentials_json = os.getenv("GS_CREDENTIALS_JSON")
+    gcp_credentials_file = os.getenv("GS_CREDENTIALS")
+    
+    if gcp_credentials_json:
+        # Parse credentials from JSON string in environment variable
+        try:
+            service_account_info = json.loads(gcp_credentials_json)
+            gcp_credentials = service_account.Credentials.from_service_account_info(service_account_info)
+        except json.JSONDecodeError:
+            print("Warning: Invalid JSON in GS_CREDENTIALS_JSON environment variable")
+    elif gcp_credentials_file:
+        # Load credentials from file path
+        try:
+            gcp_credentials = service_account.Credentials.from_service_account_file(gcp_credentials_file)
+        except Exception as e:
+            print(f"Warning: Could not load GCP credentials from file: {e}")
+    
+    STORAGES = {
+        "default": {
+            "BACKEND": "storages.backends.gcloud.GoogleCloudStorage",
+            "OPTIONS": {
+                "project_id": os.getenv("GS_PROJECT_ID"),
+                "bucket_name": os.getenv("GS_BUCKET_NAME"),
+                "location": os.getenv("GS_LOCATION", ""),  # Optional subfolder in the bucket
+                "file_overwrite": False,
+                "credentials": gcp_credentials,
+            },
         },
-    },
-    "staticfiles": {
-        "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
-    },
-}
-AWS_S3_SIGNATURE_VERSION = "s3v4"
-if os.getenv("USE_IRSA_FOR_S3_STORAGE", "false") == "true":
-    AWS_S3_ADDRESSING_STYLE = "virtual"
-AWS_RECORDING_STORAGE_BUCKET_NAME = os.getenv("AWS_RECORDING_STORAGE_BUCKET_NAME")
+        "staticfiles": {
+            "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+        },
+    }
+    # Additional GCS settings
+    GS_RECORDING_STORAGE_BUCKET_NAME = os.getenv("GS_BUCKET_NAME")
+    GS_DEFAULT_ACL = os.getenv("GS_DEFAULT_ACL", "private")
+    GS_MAX_MEMORY_SIZE = int(os.getenv("GS_MAX_MEMORY_SIZE", 0))
+    GS_BLOB_CHUNK_SIZE = int(os.getenv("GS_BLOB_CHUNK_SIZE", 1024 * 1024 * 5))  # 5 MB default
+else:
+    # S3 compatible storage (AWS S3, MinIO, etc.)
+    STORAGES = {
+        "default": {
+            "BACKEND": "storages.backends.s3.S3Storage",
+            "OPTIONS": {
+                "endpoint_url": os.getenv("AWS_ENDPOINT_URL"),
+                "access_key": os.getenv("AWS_ACCESS_KEY_ID"),
+                "secret_key": os.getenv("AWS_SECRET_ACCESS_KEY"),
+            },
+        },
+        "staticfiles": {
+            "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+        },
+    }
+    # Additional S3 settings
+    AWS_S3_SIGNATURE_VERSION = "s3v4"
+    if os.getenv("USE_IRSA_FOR_S3_STORAGE", "false") == "true":
+        AWS_S3_ADDRESSING_STYLE = "virtual"
+    AWS_RECORDING_STORAGE_BUCKET_NAME = os.getenv("AWS_RECORDING_STORAGE_BUCKET_NAME")
+
+# Common settings
 CHARGE_CREDITS_FOR_BOTS = os.getenv("CHARGE_CREDITS_FOR_BOTS", "false") == "true"
