@@ -38,6 +38,9 @@ EMAIL_PORT = 587
 EMAIL_USE_TLS = True
 DEFAULT_FROM_EMAIL = "noreply@arali.ai"
 
+# Explicitly disable email verification
+ACCOUNT_EMAIL_VERIFICATION = "none"
+
 ADMINS = []
 
 if os.getenv("ERROR_REPORTS_RECEIVER_EMAIL_ADDRESS"):
