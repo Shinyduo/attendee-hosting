@@ -165,17 +165,15 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # Import database configuration
 from attendee.settings.database import DATABASES
 
-# Redis/Celery Configuration
-if os.getenv("DISABLE_REDIS_SSL"):
-    REDIS_CELERY_URL = os.getenv("REDIS_URL") + "?ssl_cert_reqs=none"
-else:
-    REDIS_CELERY_URL = os.getenv("REDIS_URL")
-
-CELERY_BROKER_URL = REDIS_CELERY_URL
-CELERY_RESULT_BACKEND = REDIS_CELERY_URL
-CELERY_ACCEPT_CONTENT = ["json"]
-CELERY_TASK_SERIALIZER = "json"
-CELERY_RESULT_SERIALIZER = "json"
+# Import Redis/Celery configuration
+from attendee.settings.redis import (
+    REDIS_CELERY_URL,
+    CELERY_BROKER_URL,
+    CELERY_RESULT_BACKEND,
+    CELERY_ACCEPT_CONTENT,
+    CELERY_TASK_SERIALIZER,
+    CELERY_RESULT_SERIALIZER,
+)
 
 REST_FRAMEWORK = {
     # YOUR SETTINGS
