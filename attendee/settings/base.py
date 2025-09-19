@@ -64,12 +64,14 @@ if os.getenv("DISABLE_SIGNUP"):
 else:
     ACCOUNT_ADAPTER = "accounts.adapters.StandardAccountAdapter"
 ACCOUNT_AUTHENTICATION_METHOD = "email"
-ACCOUNT_EMAIL_REQUIRED = False
+ACCOUNT_EMAIL_REQUIRED = True
 ACCOUNT_USERNAME_REQUIRED = False
 ACCOUNT_EMAIL_VERIFICATION = "none"
 ACCOUNT_UNIQUE_EMAIL = True
 LOGIN_REDIRECT_URL = "/"
-EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"
+EMAIL_BACKEND = "django.core.mail.backends.dummy.EmailBackend"
+DEFAULT_FROM_EMAIL = "noreply@example.com"
+SERVER_EMAIL = "noreply@example.com"
 ACCOUNT_CONFIRM_EMAIL_ON_GET = True
 ACCOUNT_LOGIN_ON_EMAIL_CONFIRMATION = True
 ACCOUNT_LOGIN_ON_PASSWORD_RESET = True
