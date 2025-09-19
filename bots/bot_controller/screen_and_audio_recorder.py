@@ -29,6 +29,75 @@ class ScreenAndAudioRecorder:
         except:
             pass  # Ignore errors during cleanup
 
+    def _get_audio_input_options(self):
+        """
+        Detect available audio input options and return appropriate FFmpeg parameters.
+        Returns None if no audio input is available.
+        """
+        # Check if audio recording is explicitly disabled
+        if os.environ.get('DISABLE_AUDIO_RECORDING', '').lower() in ('1', 'true', 'yes'):
+            logger.info("Audio recording disabled by environment variable DISABLE_AUDIO_RECORDING")
+            return None
+            
+        audio_options = []
+        
+        # Try different audio input methods in order of preference
+        audio_methods = [
+            # Method 1: Try default ALSA device
+            (["-thread_queue_size", "4096", "-f", "alsa", "-i", "default"], "ALSA default"),
+            
+            # Method 2: Try PulseAudio if available
+            (["-thread_queue_size", "4096", "-f", "pulse", "-i", "default"], "PulseAudio default"),
+            
+            # Method 3: Try specific ALSA device
+            (["-thread_queue_size", "4096", "-f", "alsa", "-i", "hw:0"], "ALSA hw:0"),
+            
+            # Method 4: Generate silent audio (last resort)
+            (["-f", "lavfi", "-i", "anullsrc=channel_layout=mono:sample_rate=44100"], "Silent audio generator"),
+        ]
+        
+        for audio_cmd, description in audio_methods:
+            if self._test_audio_input(audio_cmd, description):
+                logger.info(f"Using audio input method: {description}")
+                return audio_cmd
+                
+        logger.warning("No working audio input found, will record video only")
+        return None
+    
+    def _test_audio_input(self, audio_cmd, description):
+        """Test if a specific audio input configuration works"""
+        try:
+            # Create a quick test command to check if audio input works
+            test_cmd = ["ffmpeg", "-y"] + audio_cmd + ["-t", "0.1", "-f", "null", "-"]
+            
+            # Run the test command with a short timeout
+            result = subprocess.run(
+                test_cmd, 
+                stdout=subprocess.DEVNULL, 
+                stderr=subprocess.PIPE, 
+                timeout=3,
+                text=True
+            )
+            
+            # Check if the command succeeded (exit code 0) and didn't have critical errors
+            if result.returncode == 0:
+                return True
+            
+            # Also check stderr for specific error patterns that might be recoverable
+            stderr_output = result.stderr.lower()
+            if "input/output error" in stderr_output or "no such file or directory" in stderr_output:
+                return False
+                
+            # Some warnings are OK, as long as we didn't get a complete failure
+            return "error" not in stderr_output
+            
+        except subprocess.TimeoutExpired:
+            logger.debug(f"Audio test timed out for {description}")
+            return False
+        except Exception as e:
+            logger.debug(f"Audio test failed for {description}: {e}")
+            return False
+
     def start_recording(self, display_var):
         logger.info(f"Starting screen recorder for display {display_var} with dimensions {self.screen_dimensions} and file location {self.file_location}")
         
@@ -39,16 +108,16 @@ class ScreenAndAudioRecorder:
             self.ffmpeg_log_file = os.path.join(log_dir, log_filename)
 
         if self.audio_only:
+            # For audio-only recording, we must have audio input
+            audio_options = self._get_audio_input_options()
+            if not audio_options:
+                raise RuntimeError("No audio input available for audio-only recording")
+                
             # FFmpeg command for audio-only recording to MP3
             ffmpeg_cmd = [
                 "ffmpeg",
                 "-y",  # Overwrite output file without asking
-                "-thread_queue_size",
-                "4096",
-                "-f",
-                "alsa",  # Audio input format for Linux
-                "-i",
-                "default",  # Default audio input device
+            ] + audio_options + [
                 "-c:a",
                 "libmp3lame",  # MP3 codec
                 "-b:a",
@@ -60,7 +129,34 @@ class ScreenAndAudioRecorder:
                 self.file_location,
             ]
         else:
-            ffmpeg_cmd = ["ffmpeg", "-y", "-thread_queue_size", "4096", "-framerate", "30", "-video_size", f"{self.screen_dimensions[0]}x{self.screen_dimensions[1]}", "-f", "x11grab", "-draw_mouse", "0", "-probesize", "32", "-i", display_var, "-thread_queue_size", "4096", "-f", "alsa", "-i", "default", "-vf", f"crop={self.recording_dimensions[0]}:{self.recording_dimensions[1]}:10:10", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", "30", "-c:a", "aac", "-strict", "experimental", "-b:a", "128k", self.file_location]
+            # Check if we should skip audio due to environment constraints
+            audio_options = self._get_audio_input_options()
+            
+            if audio_options:
+                # Include audio in recording
+                ffmpeg_cmd = [
+                    "ffmpeg", "-y", "-thread_queue_size", "4096", 
+                    "-framerate", "30", 
+                    "-video_size", f"{self.screen_dimensions[0]}x{self.screen_dimensions[1]}", 
+                    "-f", "x11grab", "-draw_mouse", "0", "-probesize", "32", "-i", display_var,
+                ] + audio_options + [
+                    "-vf", f"crop={self.recording_dimensions[0]}:{self.recording_dimensions[1]}:10:10", 
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", "30", 
+                    "-c:a", "aac", "-strict", "experimental", "-b:a", "128k", 
+                    self.file_location
+                ]
+            else:
+                # Video-only recording (no audio)
+                logger.warning("Audio device not available, recording video only")
+                ffmpeg_cmd = [
+                    "ffmpeg", "-y", "-thread_queue_size", "4096", 
+                    "-framerate", "30", 
+                    "-video_size", f"{self.screen_dimensions[0]}x{self.screen_dimensions[1]}", 
+                    "-f", "x11grab", "-draw_mouse", "0", "-probesize", "32", "-i", display_var,
+                    "-vf", f"crop={self.recording_dimensions[0]}:{self.recording_dimensions[1]}:10:10", 
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", "30", 
+                    self.file_location
+                ]
 
         logger.info(f"Starting FFmpeg command: {' '.join(ffmpeg_cmd)}")
         
