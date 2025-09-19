@@ -2,13 +2,13 @@ import os
 
 import dj_database_url  # type: ignore
 
-from .base import *
+from .base import *  # type: ignore
 
 DEBUG = False
 ALLOWED_HOSTS = ["*"]
 
-# Override the database configuration from base settings
-# Use the direct dj_database_url.config() method if DATABASE_URL exists
+# Override the database configuration from base settings only if DATABASE_URL exists
+# otherwise use the configuration from database.py
 if os.getenv("DATABASE_URL"):
     DATABASES = {
         "default": dj_database_url.config(

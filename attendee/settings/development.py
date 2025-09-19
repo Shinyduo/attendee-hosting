@@ -1,6 +1,6 @@
 import os
 
-from .base import *
+from .base import *  # type: ignore
 
 DEBUG = True
 ALLOWED_HOSTS = ["tendee-stripe-hooks.ngrok.io", "localhost"]

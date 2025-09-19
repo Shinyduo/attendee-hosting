@@ -11,6 +11,7 @@ import os
 
 from django.core.wsgi import get_wsgi_application
 
+# Set the default settings module - the actual module will be determined in settings/__init__.py
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "attendee.settings")
 
 application = get_wsgi_application()
