@@ -68,14 +68,14 @@ class ScreenAndAudioRecorder:
         """Test if a specific audio input configuration works"""
         try:
             # Create a quick test command to check if audio input works
-            test_cmd = ["ffmpeg", "-y"] + audio_cmd + ["-t", "0.1", "-f", "null", "-"]
+            test_cmd = ["ffmpeg", "-y"] + audio_cmd + ["-t", "1.0", "-f", "null", "-"]
             
             # Run the test command with a short timeout
             result = subprocess.run(
                 test_cmd, 
                 stdout=subprocess.DEVNULL, 
                 stderr=subprocess.PIPE, 
-                timeout=3,
+                timeout=5,  # Increased timeout for more thorough testing
                 text=True
             )
             
@@ -83,13 +83,30 @@ class ScreenAndAudioRecorder:
             if result.returncode == 0:
                 return True
             
-            # Also check stderr for specific error patterns that might be recoverable
+            # Check stderr for specific error patterns that indicate failures
             stderr_output = result.stderr.lower()
-            if "input/output error" in stderr_output or "no such file or directory" in stderr_output:
+            
+            # These are definitive failure patterns
+            failure_patterns = [
+                "input/output error",
+                "no such file or directory", 
+                "no such process",
+                "cannot open audio device",
+                "connection refused",
+                "permission denied"
+            ]
+            
+            if any(pattern in stderr_output for pattern in failure_patterns):
+                logger.debug(f"Audio test failed for {description}: {stderr_output[:200]}")
                 return False
                 
-            # Some warnings are OK, as long as we didn't get a complete failure
-            return "error" not in stderr_output
+            # For non-zero exit codes, be more conservative
+            if result.returncode != 0:
+                logger.debug(f"Audio test returned non-zero exit code {result.returncode} for {description}")
+                return False
+                
+            # If we get here, it might be recoverable
+            return True
             
         except subprocess.TimeoutExpired:
             logger.debug(f"Audio test timed out for {description}")
@@ -128,12 +145,15 @@ class ScreenAndAudioRecorder:
                 "1",  # Mono
                 self.file_location,
             ]
+            
+            # Try to start recording
+            self._attempt_recording(ffmpeg_cmd, display_var)
         else:
-            # Check if we should skip audio due to environment constraints
+            # For video recording, try with audio first, then fallback to video-only
             audio_options = self._get_audio_input_options()
             
             if audio_options:
-                # Include audio in recording
+                # Try with audio first
                 ffmpeg_cmd = [
                     "ffmpeg", "-y", "-thread_queue_size", "4096", 
                     "-framerate", "30", 
@@ -145,19 +165,34 @@ class ScreenAndAudioRecorder:
                     "-c:a", "aac", "-strict", "experimental", "-b:a", "128k", 
                     self.file_location
                 ]
-            else:
-                # Video-only recording (no audio)
-                logger.warning("Audio device not available, recording video only")
-                ffmpeg_cmd = [
-                    "ffmpeg", "-y", "-thread_queue_size", "4096", 
-                    "-framerate", "30", 
-                    "-video_size", f"{self.screen_dimensions[0]}x{self.screen_dimensions[1]}", 
-                    "-f", "x11grab", "-draw_mouse", "0", "-probesize", "32", "-i", display_var,
-                    "-vf", f"crop={self.recording_dimensions[0]}:{self.recording_dimensions[1]}:10:10", 
-                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", "30", 
-                    self.file_location
-                ]
+                
+                # Try recording with audio
+                if self._attempt_recording(ffmpeg_cmd, display_var, allow_fallback=True):
+                    return  # Success!
+                
+                # If failed and fallback allowed, try video-only
+                logger.warning("Audio recording failed, falling back to video-only recording")
+            
+            # Video-only recording (either by choice or fallback)
+            logger.info("Recording video only (no audio)")
+            ffmpeg_cmd = [
+                "ffmpeg", "-y", "-thread_queue_size", "4096", 
+                "-framerate", "30", 
+                "-video_size", f"{self.screen_dimensions[0]}x{self.screen_dimensions[1]}", 
+                "-f", "x11grab", "-draw_mouse", "0", "-probesize", "32", "-i", display_var,
+                "-vf", f"crop={self.recording_dimensions[0]}:{self.recording_dimensions[1]}:10:10", 
+                "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", "30", 
+                self.file_location
+            ]
+            
+            # Final attempt - this should not fail
+            self._attempt_recording(ffmpeg_cmd, display_var, allow_fallback=False)
 
+    def _attempt_recording(self, ffmpeg_cmd, display_var, allow_fallback=False):
+        """
+        Attempt to start recording with the given FFmpeg command.
+        Returns True if successful, False if failed and fallback is allowed.
+        """
         logger.info(f"Starting FFmpeg command: {' '.join(ffmpeg_cmd)}")
         
         # Open log file for ffmpeg output
@@ -180,11 +215,15 @@ class ScreenAndAudioRecorder:
             logger.info(f"FFmpeg process started with PID: {self.ffmpeg_proc.pid}")
             
             # Give ffmpeg a moment to initialize
-            time.sleep(1)
+            time.sleep(2)  # Increased from 1 to 2 seconds for better detection
             
             # Check if process is still running after initialization
             if self.ffmpeg_proc.poll() is not None:
-                logger.error(f"FFmpeg process exited immediately with return code: {self.ffmpeg_proc.returncode}")
+                return_code = self.ffmpeg_proc.returncode
+                logger.error(f"FFmpeg process exited immediately with return code: {return_code}")
+                
+                # Read the error output
+                error_output = ""
                 if self.ffmpeg_log_file and os.path.exists(self.ffmpeg_log_file):
                     try:
                         with open(self.ffmpeg_log_file, 'r') as f:
@@ -192,17 +231,48 @@ class ScreenAndAudioRecorder:
                             logger.error(f"FFmpeg error output: {error_output}")
                     except Exception as e:
                         logger.error(f"Could not read ffmpeg log file: {e}")
+                
+                # Check if this is an audio-related error that we can recover from
+                if allow_fallback and self._is_audio_related_error(error_output):
+                    logger.warning("Detected audio-related error, will attempt video-only fallback")
+                    self.ffmpeg_proc = None
+                    return False  # Indicate fallback should be attempted
+                
+                # For non-audio errors or when fallback not allowed, raise exception
+                self.ffmpeg_proc = None
+                raise RuntimeError(f"FFmpeg process failed to start (exit code: {return_code})")
             else:
                 logger.info("FFmpeg process started successfully")
+                return True  # Success
                 
         except Exception as e:
             logger.error(f"Failed to start FFmpeg process: {e}")
-            if log_file_handle:
-                log_file_handle.close()
+            if allow_fallback and "audio" in str(e).lower():
+                logger.warning("Audio-related error detected, will attempt fallback")
+                return False
             raise
         finally:
             if log_file_handle:
                 log_file_handle.close()
+
+    def _is_audio_related_error(self, error_output):
+        """Check if FFmpeg error output indicates an audio-related problem"""
+        if not error_output:
+            return False
+            
+        error_output_lower = error_output.lower()
+        audio_error_patterns = [
+            "no such process",
+            "input/output error", 
+            "alsa",
+            "pulse",
+            "audio device",
+            "default:",
+            "cannot open audio device",
+            "no such file or directory"
+        ]
+        
+        return any(pattern in error_output_lower for pattern in audio_error_patterns)
 
     # Pauses by muting the audio and showing a black xterm covering the entire screen
     def pause_recording(self):
