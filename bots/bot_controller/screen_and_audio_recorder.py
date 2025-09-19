@@ -19,6 +19,7 @@ class ScreenAndAudioRecorder:
         self.xterm_proc = None
         self.ffmpeg_log_file = None
         self.recording_started_time = None
+        self.pulseaudio_setup_attempted = False
 
     def __del__(self):
         """Ensure ffmpeg process is cleaned up on object destruction"""
@@ -38,22 +39,26 @@ class ScreenAndAudioRecorder:
         if os.environ.get('DISABLE_AUDIO_RECORDING', '').lower() in ('1', 'true', 'yes'):
             logger.info("Audio recording disabled by environment variable DISABLE_AUDIO_RECORDING")
             return None
-            
-        audio_options = []
         
+        # Try to set up PulseAudio for meeting capture if not already attempted
+        if not self.pulseaudio_setup_attempted:
+            self.pulseaudio_setup_attempted = True
+            if self.start_pulseaudio_if_needed():
+                self.setup_pulseaudio_for_meeting_capture()
+            
         # Try different audio input methods in order of preference
         audio_methods = [
-            # Method 1: Try default ALSA device
+            # Method 1: Try PulseAudio Chrome sink monitor (for actual meeting audio)
+            (["-thread_queue_size", "4096", "-f", "pulse", "-i", "ChromeSink.monitor"], "PulseAudio ChromeSink monitor"),
+            
+            # Method 2: Try default ALSA device
             (["-thread_queue_size", "4096", "-f", "alsa", "-i", "default"], "ALSA default"),
             
-            # Method 2: Try PulseAudio if available
+            # Method 3: Try PulseAudio default if available
             (["-thread_queue_size", "4096", "-f", "pulse", "-i", "default"], "PulseAudio default"),
             
-            # Method 3: Try specific ALSA device
+            # Method 4: Try specific ALSA device
             (["-thread_queue_size", "4096", "-f", "alsa", "-i", "hw:0"], "ALSA hw:0"),
-            
-            # Method 4: Generate silent audio (last resort)
-            (["-f", "lavfi", "-i", "anullsrc=channel_layout=mono:sample_rate=44100"], "Silent audio generator"),
         ]
         
         for audio_cmd, description in audio_methods:
@@ -113,6 +118,111 @@ class ScreenAndAudioRecorder:
             return False
         except Exception as e:
             logger.debug(f"Audio test failed for {description}: {e}")
+            return False
+
+    def setup_pulseaudio_for_meeting_capture(self):
+        """
+        Set up PulseAudio for capturing meeting audio in headless environments.
+        Creates a virtual sink that Chrome can output to, which we can then record.
+        """
+        try:
+            # Check if PulseAudio is available
+            result = subprocess.run(["pactl", "info"], capture_output=True, timeout=5)
+            if result.returncode != 0:
+                logger.info("PulseAudio not available, skipping meeting audio setup")
+                return False
+                
+            logger.info("Setting up PulseAudio for meeting audio capture")
+            
+            # Create virtual sink for Chrome audio output
+            subprocess.run([
+                "pactl", "load-module", "module-null-sink",
+                "sink_name=ChromeSink",
+                "sink_properties=device.description=ChromeSink"
+            ], check=True, timeout=10)
+            logger.info("Created ChromeSink virtual audio sink")
+            
+            # Create loopback module for monitoring
+            subprocess.run([
+                "pactl", "load-module", "module-loopback", 
+                "latency_msec=1"
+            ], check=True, timeout=10)
+            logger.info("Created loopback module for audio monitoring")
+            
+            # Set ChromeSink as default output (so Chrome uses it)
+            subprocess.run([
+                "pactl", "set-default-sink", "ChromeSink"
+            ], check=True, timeout=10)
+            logger.info("Set ChromeSink as default audio output")
+            
+            # Optionally create a virtual microphone for Chrome
+            try:
+                subprocess.run([
+                    "pactl", "load-module", "module-virtual-source",
+                    "source_name=ChromeMic",
+                    "master=ChromeSink.monitor"
+                ], check=True, timeout=10)
+                
+                subprocess.run([
+                    "pactl", "set-default-source", "ChromeMic"
+                ], check=True, timeout=10)
+                logger.info("Created and set ChromeMic as default audio input")
+            except subprocess.CalledProcessError:
+                logger.info("Could not create virtual microphone (optional)")
+            
+            # Set reasonable volume level
+            try:
+                subprocess.run([
+                    "pactl", "set-sink-volume", "ChromeSink", "100%"
+                ], check=True, timeout=10)
+                logger.info("Set ChromeSink volume to 100%")
+            except subprocess.CalledProcessError:
+                logger.warning("Could not set sink volume")
+            
+            return True
+            
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"Failed to set up PulseAudio meeting capture: {e}")
+            return False
+        except subprocess.TimeoutExpired:
+            logger.warning("PulseAudio setup timed out")
+            return False
+        except Exception as e:
+            logger.warning(f"Error setting up PulseAudio: {e}")
+            return False
+
+    def start_pulseaudio_if_needed(self):
+        """Start PulseAudio daemon if not already running"""
+        try:
+            # Check if PulseAudio is already running
+            result = subprocess.run(["pactl", "info"], capture_output=True, timeout=5)
+            if result.returncode == 0:
+                logger.info("PulseAudio is already running")
+                return True
+                
+            logger.info("Starting PulseAudio daemon")
+            # Start PulseAudio in daemon mode
+            subprocess.run([
+                "pulseaudio", "-D", "--exit-idle-time=-1"
+            ], check=True, timeout=10)
+            
+            # Wait a moment for it to start
+            time.sleep(2)
+            
+            # Verify it's running
+            result = subprocess.run(["pactl", "info"], capture_output=True, timeout=5)
+            if result.returncode == 0:
+                logger.info("PulseAudio started successfully")
+                return True
+            else:
+                logger.warning("PulseAudio failed to start properly")
+                return False
+                
+        except subprocess.CalledProcessError as e:
+            logger.warning(f"Failed to start PulseAudio: {e}")
+            return False
+        except Exception as e:
+            logger.warning(f"Error starting PulseAudio: {e}")
             return False
 
     def start_recording(self, display_var):
