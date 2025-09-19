@@ -5,16 +5,8 @@ from .base import *
 DEBUG = True
 ALLOWED_HOSTS = ["tendee-stripe-hooks.ngrok.io", "localhost"]
 
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": "attendee_development",
-        "USER": "attendee_development_user",
-        "PASSWORD": "attendee_development_user",
-        "HOST": os.getenv("POSTGRES_HOST", "localhost"),
-        "PORT": "5432",
-    }
-}
+# Database configuration is now imported from database.py in base.py
+# We don't need to redefine it here unless you want to override specific settings
 
 # Log more stuff in development
 LOGGING = {

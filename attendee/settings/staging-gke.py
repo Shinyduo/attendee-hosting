@@ -1,3 +1,4 @@
+import os
 import dj_database_url
 
 from .base import *
@@ -5,14 +6,18 @@ from .base import *
 DEBUG = False
 ALLOWED_HOSTS = ["*"]
 
-DATABASES = {
-    "default": dj_database_url.config(
-        env="DATABASE_URL",
-        conn_max_age=600,
-        conn_health_checks=True,
-        ssl_require=True,
-    ),
-}
+# Override the database configuration from base settings
+# Use the direct dj_database_url.config() method if DATABASE_URL exists
+if os.getenv("DATABASE_URL"):
+    DATABASES = {
+        "default": dj_database_url.config(
+            env="DATABASE_URL",
+            conn_max_age=600,
+            conn_health_checks=True,
+            ssl_require=True,
+        ),
+    }
+# If DATABASE_URL is not set, the fallback in database.py will apply
 
 # PRESERVE CELERY TASKS IF WORKER IS SHUT DOWN
 CELERY_TASK_ACKS_LATE = True
