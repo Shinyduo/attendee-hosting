@@ -40,34 +40,65 @@ class ScreenAndAudioRecorder:
             logger.info("Audio recording disabled by environment variable DISABLE_AUDIO_RECORDING")
             return None
         
+        # Force PulseAudio in container environments
+        if os.environ.get('FORCE_PULSE', '').lower() in ('1', 'true', 'yes'):
+            logger.info("Forcing PulseAudio ChromeSink monitor due to FORCE_PULSE environment variable")
+            return ["-thread_queue_size", "4096", "-f", "pulse", "-i", "ChromeSink.monitor"]
+        
         # Try to set up PulseAudio for meeting capture if not already attempted
+        pulseaudio_available = False
         if not self.pulseaudio_setup_attempted:
             self.pulseaudio_setup_attempted = True
             if self.start_pulseaudio_if_needed():
-                self.setup_pulseaudio_for_meeting_capture()
+                pulseaudio_available = self.setup_pulseaudio_for_meeting_capture()
+        
+        # If we successfully set up PulseAudio ChromeSink, use it directly
+        # Don't test it because there might not be active audio streams yet
+        if pulseaudio_available:
+            logger.info("PulseAudio ChromeSink setup successful, using ChromeSink.monitor for meeting audio")
+            return ["-thread_queue_size", "4096", "-f", "pulse", "-i", "ChromeSink.monitor"]
+        
+        # Check if PulseAudio is available and ChromeSink exists (from previous setup)
+        if self._check_pulseaudio_chromesink_exists():
+            logger.info("Found existing ChromeSink, using ChromeSink.monitor for meeting audio")
+            return ["-thread_queue_size", "4096", "-f", "pulse", "-i", "ChromeSink.monitor"]
             
-        # Try different audio input methods in order of preference
+        # Fall back to traditional audio detection only if PulseAudio setup failed
+        logger.warning("PulseAudio ChromeSink not available, falling back to traditional audio sources")
         audio_methods = [
-            # Method 1: Try PulseAudio Chrome sink monitor (for actual meeting audio)
-            (["-thread_queue_size", "4096", "-f", "pulse", "-i", "ChromeSink.monitor"], "PulseAudio ChromeSink monitor"),
+            # Method 1: Try PulseAudio default if available
+            (["-thread_queue_size", "4096", "-f", "pulse", "-i", "default"], "PulseAudio default"),
             
             # Method 2: Try default ALSA device
             (["-thread_queue_size", "4096", "-f", "alsa", "-i", "default"], "ALSA default"),
             
-            # Method 3: Try PulseAudio default if available
-            (["-thread_queue_size", "4096", "-f", "pulse", "-i", "default"], "PulseAudio default"),
-            
-            # Method 4: Try specific ALSA device
+            # Method 3: Try specific ALSA device
             (["-thread_queue_size", "4096", "-f", "alsa", "-i", "hw:0"], "ALSA hw:0"),
         ]
         
         for audio_cmd, description in audio_methods:
             if self._test_audio_input(audio_cmd, description):
-                logger.info(f"Using audio input method: {description}")
+                logger.info(f"Using fallback audio input method: {description}")
                 return audio_cmd
                 
         logger.warning("No working audio input found, will record video only")
         return None
+
+    def _check_pulseaudio_chromesink_exists(self):
+        """Check if ChromeSink already exists in PulseAudio"""
+        try:
+            result = subprocess.run(
+                ["pactl", "list", "short", "sinks"], 
+                capture_output=True, 
+                timeout=5, 
+                text=True
+            )
+            if result.returncode == 0:
+                # Check if ChromeSink is in the output
+                return "ChromeSink" in result.stdout
+        except:
+            pass
+        return False
     
     def _test_audio_input(self, audio_cmd, description):
         """Test if a specific audio input configuration works"""
@@ -134,12 +165,22 @@ class ScreenAndAudioRecorder:
                 
             logger.info("Setting up PulseAudio for meeting audio capture")
             
+            # Check if ChromeSink already exists
+            if self._check_pulseaudio_chromesink_exists():
+                logger.info("ChromeSink already exists, skipping creation")
+                return True
+            
             # Create virtual sink for Chrome audio output
-            subprocess.run([
+            result = subprocess.run([
                 "pactl", "load-module", "module-null-sink",
                 "sink_name=ChromeSink",
                 "sink_properties=device.description=ChromeSink"
-            ], check=True, timeout=10)
+            ], capture_output=True, timeout=10)
+            
+            if result.returncode != 0:
+                logger.error(f"Failed to create ChromeSink: {result.stderr.decode()}")
+                return False
+            
             logger.info("Created ChromeSink virtual audio sink")
             
             # Create loopback module for monitoring
@@ -179,7 +220,13 @@ class ScreenAndAudioRecorder:
             except subprocess.CalledProcessError:
                 logger.warning("Could not set sink volume")
             
-            return True
+            # Verify ChromeSink was created successfully
+            if self._check_pulseaudio_chromesink_exists():
+                logger.info("ChromeSink setup completed successfully")
+                return True
+            else:
+                logger.error("ChromeSink setup failed - sink not found after creation")
+                return False
             
         except subprocess.CalledProcessError as e:
             logger.warning(f"Failed to set up PulseAudio meeting capture: {e}")

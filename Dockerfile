@@ -5,6 +5,9 @@ SHELL ["/bin/bash", "-c"]
 ENV project=attendee
 ENV cwd=/$project
 
+# Force PulseAudio in container environments for meeting audio capture
+ENV FORCE_PULSE=1
+
 WORKDIR $cwd
 
 ARG DEBIAN_FRONTEND=noninteractive
