@@ -1,5 +1,5 @@
 <div align="center">
-<img src="static/images/logo_black_white.svg" width="300" alt="Attendee Logo">
+<img src="https://res.cloudinary.com/dh2nt6hgh/image/upload/v1758345104/Screenshot_2025-09-20_at_10.41.36_AM_xh00mm.png" width="300" alt="Arali Logo">
 </div>
 <h2 align="center">Meeting bots made easy</h2>
 <p align="center">

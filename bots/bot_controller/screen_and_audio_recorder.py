@@ -8,6 +8,16 @@ logger = logging.getLogger(__name__)
 
 
 class ScreenAndAudioRecorder:
+    """
+    Records screen and audio from web meetings using FFmpeg and PulseAudio.
+    
+    For best audio capture results:
+    1. Call setup_audio_before_chrome() BEFORE starting Chrome/WebDriver
+    2. After meeting starts, call ensure_chrome_audio_capture() to verify audio routing
+    3. Use start_recording() as normal
+    
+    This ensures Chrome's audio is properly routed to our virtual ChromeSink for capture.
+    """
     def __init__(self, file_location, recording_dimensions, audio_only):
         self.file_location = file_location
         self.ffmpeg_proc = None
@@ -53,7 +63,8 @@ class ScreenAndAudioRecorder:
         if force_pulse:
             if self._wait_for_chromesink_monitor(timeout_sec=5):
                 logger.info("Using PulseAudio ChromeSink.monitor for meeting audio")
-                return ["-thread_queue_size", "4096", "-f", "pulse", "-i", "ChromeSink.monitor"]
+                return ["-thread_queue_size", "4096", "-f", "pulse", "-i", "ChromeSink.monitor", 
+                       "-af", "asetpts=PTS-STARTPTS"]
             else:
                 logger.warning("FORCE_PULSE requested but ChromeSink.monitor not found; falling back to Pulse default")
                 # fall through to default detection
@@ -61,7 +72,8 @@ class ScreenAndAudioRecorder:
         # If ChromeSink exists (from earlier setup), use it
         if self._check_pulseaudio_chromesink_exists() and self._wait_for_chromesink_monitor(timeout_sec=2):
             logger.info("Found existing ChromeSink.monitor, using it for meeting audio")
-            return ["-thread_queue_size", "4096", "-f", "pulse", "-i", "ChromeSink.monitor"]
+            return ["-thread_queue_size", "4096", "-f", "pulse", "-i", "ChromeSink.monitor",
+                   "-af", "asetpts=PTS-STARTPTS"]
 
         # Fallbacks
         logger.warning("PulseAudio ChromeSink not available, falling back to traditional audio sources")
@@ -108,30 +120,150 @@ class ScreenAndAudioRecorder:
             time.sleep(0.25)
         return False
 
-    def attempt_move_chrome_to_sink(self):
-        """Optional: move any active Chrome sink inputs onto ChromeSink."""
+    def move_chrome_audio_to_chromesink(self):
+        """Move any active Chrome sink inputs to ChromeSink for audio capture."""
         try:
-            # List sink inputs: index, sink, driver, sample_spec, channel_map, owner_module, client, tty, flags, properties...
-            out = subprocess.run(["pactl", "list", "short", "sink-inputs"], capture_output=True, text=True, timeout=5)
-            if out.returncode != 0 or not out.stdout.strip():
-                return
-            lines = out.stdout.strip().splitlines()
-            for line in lines:
-                # e.g.: "42\t1\t... application.name = \"Google Chrome\" ..."
-                # We don't always get properties here; fallback to moving all if in doubt.
-                parts = line.split('\t')
-                if not parts:
+            logger.info("Attempting to move Chrome audio streams to ChromeSink")
+            # List sink inputs with properties (needed to find Chrome)
+            props = subprocess.run(["pactl", "list", "sink-inputs"], capture_output=True, text=True, timeout=5).stdout
+            if not props.strip():
+                logger.debug("No active sink inputs found")
+                return False
+            
+            import re
+            blocks = re.split(r"Sink Input #", props)[1:]
+            moved_count = 0
+            
+            for block in blocks:
+                lines = block.splitlines()
+                if not lines:
                     continue
-                idx = parts[0].strip()
-                # Try to be conservative: only move if it's Chrome-ish
-                props = subprocess.run(["pactl", "list", "sink-inputs"], capture_output=True, text=True, timeout=5).stdout
-                if f"Sink Input #{idx}" in props:
-                    # Rough check for Chrome
-                    if any(s in props for s in [f"Sink Input #{idx}\n", "application.name = \"Google Chrome\"",
-                                                "application.name = \"Chromium\"", "media.role = \"music\""]):
-                        subprocess.run(["pactl", "move-sink-input", idx, "ChromeSink"], check=False, timeout=5)
-        except Exception:
-            pass
+                    
+                idx = lines[0].strip()
+                if not idx.isdigit():
+                    continue
+                
+                # Check if this sink input is from Chrome
+                if any(chrome_indicator in block for chrome_indicator in [
+                    'application.name = "Google Chrome"',
+                    'application.name = "Chromium"',
+                    'application.name = "Chrome"',
+                    'media.role = "music"'
+                ]):
+                    logger.info(f"Moving Chrome sink input #{idx} to ChromeSink")
+                    result = subprocess.run(["pactl", "move-sink-input", idx, "ChromeSink"], 
+                                          capture_output=True, timeout=5)
+                    if result.returncode == 0:
+                        moved_count += 1
+                        logger.info(f"Successfully moved sink input #{idx} to ChromeSink")
+                    else:
+                        logger.warning(f"Failed to move sink input #{idx}: {result.stderr.decode()}")
+            
+            if moved_count > 0:
+                logger.info(f"Moved {moved_count} Chrome audio streams to ChromeSink")
+                return True
+            else:
+                logger.warning("No Chrome audio streams found to move")
+                return False
+                
+        except Exception as e:
+            logger.warning(f"Failed to move Chrome audio to ChromeSink: {e}")
+            return False
+
+    def monitor_has_signal(self, timeout_sec=3):
+        """Check if ChromeSink.monitor has actual audio signal (not just silence)."""
+        try:
+            logger.debug("Probing ChromeSink.monitor for audio signal")
+            # Quick ffmpeg probe with volumedetect
+            cmd = ["ffmpeg", "-hide_banner", "-nostats", "-y", "-f", "pulse", "-i", "ChromeSink.monitor",
+                   "-t", "1.5", "-vn", "-af", "volumedetect", "-f", "null", "-"]
+            
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, 
+                                  text=True, timeout=timeout_sec+2)
+            
+            # Check for volume detection in stderr
+            if "max_volume:" in result.stderr:
+                # If max_volume is 0.0 dB or very low, it's likely silence
+                if "max_volume: 0.0 dB" in result.stderr or "max_volume: -inf dB" in result.stderr:
+                    logger.debug("ChromeSink.monitor appears to be silent")
+                    return False
+                else:
+                    logger.debug("ChromeSink.monitor has audio signal")
+                    return True
+            else:
+                logger.debug("Could not detect volume levels, assuming no signal")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            logger.warning("Audio signal detection timed out")
+            return False
+        except Exception as e:
+            logger.warning(f"Failed to check audio signal: {e}")
+            return False
+
+    def setup_audio_before_chrome(self):
+        """
+        Set up PulseAudio and ChromeSink before Chrome starts.
+        This is the most reliable way to ensure Chrome uses ChromeSink.
+        Call this before initializing webdriver or navigating to Meet.
+        """
+        logger.info("Setting up PulseAudio before Chrome startup")
+        
+        # Start PulseAudio if needed
+        if not self.start_pulseaudio_if_needed():
+            logger.warning("Could not start PulseAudio")
+            return False
+            
+        # Create ChromeSink
+        if not self.setup_pulseaudio_for_meeting_capture():
+            logger.warning("Could not set up ChromeSink")
+            return False
+            
+        # Set environment variable so Chrome uses the same PulseAudio server
+        os.environ['PULSE_SERVER'] = 'unix:/tmp/pulse-socket'
+        
+        # Wait a moment for everything to settle
+        time.sleep(1)
+        
+        # Verify ChromeSink.monitor exists
+        if self._wait_for_chromesink_monitor(timeout_sec=3):
+            logger.info("PulseAudio setup complete - Chrome should use ChromeSink")
+            return True
+        else:
+            logger.warning("ChromeSink.monitor not available after setup")
+            return False
+
+    def ensure_chrome_audio_capture(self, retry_count=3):
+        """
+        Ensure Chrome's audio is being captured by ChromeSink.
+        Call this after meeting starts or when you detect audio activity.
+        """
+        logger.info("Ensuring Chrome audio is routed to ChromeSink for capture")
+        
+        for attempt in range(retry_count):
+            # Check if we already have audio signal
+            if self.monitor_has_signal(timeout_sec=2):
+                logger.info("ChromeSink.monitor already has audio signal")
+                return True
+                
+            logger.info(f"Attempt {attempt + 1}/{retry_count}: Moving Chrome audio to ChromeSink")
+            
+            # Try to move Chrome's audio streams
+            if self.move_chrome_audio_to_chromesink():
+                # Wait a moment for audio to start flowing
+                time.sleep(0.5)
+                
+                # Check if we now have signal
+                if self.monitor_has_signal(timeout_sec=2):
+                    logger.info("Successfully routed Chrome audio to ChromeSink")
+                    return True
+            
+            # Wait before next attempt
+            if attempt < retry_count - 1:
+                time.sleep(1)
+        
+        logger.warning("Could not ensure Chrome audio is routed to ChromeSink")
+        return False
     
     def _test_audio_input(self, audio_cmd, description):
         """Test if a specific audio input configuration works"""
@@ -201,6 +333,12 @@ class ScreenAndAudioRecorder:
             # Check if ChromeSink already exists
             if self._check_pulseaudio_chromesink_exists():
                 logger.info("ChromeSink already exists, skipping creation")
+                # Still set as default to ensure Chrome uses it
+                try:
+                    subprocess.run(["pactl", "set-default-sink", "ChromeSink"], check=True, timeout=10)
+                    logger.info("Set existing ChromeSink as default audio output")
+                except subprocess.CalledProcessError:
+                    logger.warning("Could not set existing ChromeSink as default")
                 return True
             
             # Create virtual sink for Chrome audio output
@@ -217,11 +355,14 @@ class ScreenAndAudioRecorder:
             logger.info("Created ChromeSink virtual audio sink")
             
             # Create loopback module for monitoring
-            subprocess.run([
-                "pactl", "load-module", "module-loopback", 
-                "latency_msec=1"
-            ], check=True, timeout=10)
-            logger.info("Created loopback module for audio monitoring")
+            try:
+                subprocess.run([
+                    "pactl", "load-module", "module-loopback", 
+                    "latency_msec=1"
+                ], check=True, timeout=10)
+                logger.info("Created loopback module for audio monitoring")
+            except subprocess.CalledProcessError:
+                logger.info("Could not create loopback module (optional)")
             
             # Set ChromeSink as default output (so Chrome uses it)
             subprocess.run([
@@ -252,6 +393,10 @@ class ScreenAndAudioRecorder:
                 logger.info("Set ChromeSink volume to 100%")
             except subprocess.CalledProcessError:
                 logger.warning("Could not set sink volume")
+            
+            # Set environment variable for Chrome to use same PulseAudio server
+            os.environ['PULSE_SERVER'] = 'unix:/tmp/pulse-socket'
+            logger.info("Set PULSE_SERVER environment variable")
             
             # Verify ChromeSink was created successfully
             if self._check_pulseaudio_chromesink_exists():
