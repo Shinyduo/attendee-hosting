@@ -110,6 +110,7 @@ class BotController:
             stop_recording_screen_callback=self.screen_and_audio_recorder.stop_recording if self.screen_and_audio_recorder else None,
             video_frame_size=self.bot_in_db.recording_dimensions(),
             record_chat_messages_when_paused=self.bot_in_db.record_chat_messages_when_paused(),
+            fallback_move_chrome_audio_callback=self.screen_and_audio_recorder.fallback_move_chrome_audio if self.screen_and_audio_recorder else None,
         )
 
     def get_teams_bot_adapter(self):
@@ -144,6 +145,7 @@ class BotController:
             video_frame_size=self.bot_in_db.recording_dimensions(),
             teams_bot_login_credentials=teams_bot_login_credentials.get_credentials() if teams_bot_login_credentials and self.bot_in_db.teams_use_bot_login() else None,
             record_chat_messages_when_paused=self.bot_in_db.record_chat_messages_when_paused(),
+            fallback_move_chrome_audio_callback=self.screen_and_audio_recorder.fallback_move_chrome_audio if self.screen_and_audio_recorder else None,
         )
 
     def get_zoom_oauth_credentials(self):
@@ -187,6 +189,7 @@ class BotController:
             zoom_closed_captions_language=self.bot_in_db.zoom_closed_captions_language(),
             should_ask_for_recording_permission=self.pipeline_configuration.record_audio or self.pipeline_configuration.rtmp_stream_audio or self.pipeline_configuration.websocket_stream_audio or self.pipeline_configuration.record_video or self.pipeline_configuration.rtmp_stream_video,
             record_chat_messages_when_paused=self.bot_in_db.record_chat_messages_when_paused(),
+            fallback_move_chrome_audio_callback=self.screen_and_audio_recorder.fallback_move_chrome_audio if self.screen_and_audio_recorder else None,
         )
 
     def get_zoom_bot_adapter(self):

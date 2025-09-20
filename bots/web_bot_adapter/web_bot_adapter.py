@@ -48,6 +48,7 @@ class WebBotAdapter(BotAdapter):
         voice_agent_url: str,
         webpage_streamer_service_hostname: str,
         record_chat_messages_when_paused: bool,
+        fallback_move_chrome_audio_callback = None,
     ):
         self.display_name = display_name
         self.send_message_callback = send_message_callback
@@ -61,11 +62,15 @@ class WebBotAdapter(BotAdapter):
         self.add_participant_event_callback = add_participant_event_callback
         self.start_recording_screen_callback = start_recording_screen_callback
         self.stop_recording_screen_callback = stop_recording_screen_callback
+        self.fallback_move_chrome_audio_callback = fallback_move_chrome_audio_callback
         self.recording_view = recording_view
         self.record_chat_messages_when_paused = record_chat_messages_when_paused
         self.meeting_url = meeting_url
 
         self.video_frame_size = video_frame_size
+
+        # Track if we've attempted Chrome audio fallback to avoid repeated attempts
+        self.chrome_audio_fallback_attempted = False
 
         self.driver = None
 
@@ -253,6 +258,16 @@ class WebBotAdapter(BotAdapter):
 
         # Count a caption as audio activity
         self.last_audio_message_processed_time = time.time()
+        
+        # On first caption, try to ensure Chrome audio is routed to ChromeSink
+        if not self.chrome_audio_fallback_attempted and self.fallback_move_chrome_audio_callback:
+            self.chrome_audio_fallback_attempted = True
+            try:
+                logger.info("First caption received, attempting Chrome audio fallback routing")
+                self.fallback_move_chrome_audio_callback()
+            except Exception as e:
+                logger.warning(f"Chrome audio fallback failed: {e}")
+        
         self.upsert_caption_callback(json_data["caption"])
 
     def handle_chat_message(self, json_data):
