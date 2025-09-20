@@ -8,6 +8,13 @@ ENV cwd=/$project
 # Force PulseAudio in container environments for meeting audio capture
 ENV FORCE_PULSE=1
 
+# Set up PulseAudio environment for non-root user (UID 1000)
+ENV PULSE_RUNTIME_PATH=/run/user/1000/pulse
+ENV PULSE_SERVER=unix:/run/user/1000/pulse/native
+
+# Create PulseAudio runtime directory
+RUN mkdir -p /run/user/1000/pulse && chown -R 1000:1000 /run/user/1000
+
 WORKDIR $cwd
 
 ARG DEBIAN_FRONTEND=noninteractive

@@ -60,8 +60,8 @@
   ],
   "siteConfig": {
     "logo": {
-      "darkMode": "https://app.attendee.dev/static/images/logo_with_text.svg",
-      "lightMode": "https://app.attendee.dev/static/images/logo_with_text.svg"
+      "darkMode": "https://res.cloudinary.com/dh2nt6hgh/image/upload/v1758345104/Screenshot_2025-09-20_at_10.41.36_AM_xh00mm.png",
+      "lightMode": "https://res.cloudinary.com/dh2nt6hgh/image/upload/v1758345104/Screenshot_2025-09-20_at_10.41.36_AM_xh00mm.png"
     },
     "footer": ""
   },
