@@ -82,8 +82,7 @@ class ScreenAndAudioRecorder:
                     "-sample_rate", "48000", 
                     "-sample_fmt", "s16",  # Explicit s16 to avoid float32→s16 noise
                     "-guess_layout_max", "0",
-                    "-i", "ChromeSink.monitor", 
-                    "-af", f"aresample=async=1:min_hard_comp=0.100:first_pts=0"
+                    "-i", "ChromeSink.monitor"
                 ]
             else:
                 logger.warning("FORCE_PULSE requested but ChromeSink.monitor not found; falling back to Pulse default")
@@ -99,8 +98,7 @@ class ScreenAndAudioRecorder:
                 "-sample_rate", "48000", 
                 "-sample_fmt", "s16",  # Explicit s16 to prevent noise
                 "-guess_layout_max", "0",
-                "-i", "ChromeSink.monitor",
-                "-af", f"aresample=async=1:min_hard_comp=0.100:first_pts=0"
+                "-i", "ChromeSink.monitor"
             ]
 
         # Fallbacks with safer parameters
@@ -1395,10 +1393,10 @@ class ScreenAndAudioRecorder:
                     "-framerate", "30", 
                     "-video_size", f"{self.screen_dimensions[0]}x{self.screen_dimensions[1]}", 
                     "-f", "x11grab", "-draw_mouse", "0", "-probesize", "500k", "-i", display_var,
-                    "-ar", "48000", "-ac", "2", "-sample_fmt", "s16",  # Explicit audio output format
+                    "-filter:a", "aresample=async=1:min_hard_comp=0.100:first_pts=0,aformat=sample_fmts=s16:sample_rates=48000:channel_layouts=stereo",
                     "-vf", f"crop={self.recording_dimensions[0]}:{self.recording_dimensions[1]}:10:10", 
                     "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", "30", 
-                    "-c:a", "aac", "-b:a", "96k", "-profile:a", "aac_low", "-movflags", "+faststart",  # Optimized AAC settings
+                    "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
                     self.file_location
                 ]
                 
