@@ -35,52 +35,46 @@ class ScreenAndAudioRecorder:
         Detect available audio input options and return appropriate FFmpeg parameters.
         Returns None if no audio input is available.
         """
-        # Check if audio recording is explicitly disabled
+        # Hard disable via env
         if os.environ.get('DISABLE_AUDIO_RECORDING', '').lower() in ('1', 'true', 'yes'):
             logger.info("Audio recording disabled by environment variable DISABLE_AUDIO_RECORDING")
             return None
-        
-        # Force PulseAudio in container environments
-        if os.environ.get('FORCE_PULSE', '').lower() in ('1', 'true', 'yes'):
-            logger.info("Forcing PulseAudio ChromeSink monitor due to FORCE_PULSE environment variable")
-            return ["-thread_queue_size", "4096", "-f", "pulse", "-i", "ChromeSink.monitor"]
-        
-        # Try to set up PulseAudio for meeting capture if not already attempted
-        pulseaudio_available = False
-        if not self.pulseaudio_setup_attempted:
+
+        force_pulse = os.environ.get('FORCE_PULSE', '').lower() in ('1', 'true', 'yes')
+
+        # Always ensure PulseAudio is running if we plan to use it
+        if force_pulse or not self.pulseaudio_setup_attempted:
             self.pulseaudio_setup_attempted = True
             if self.start_pulseaudio_if_needed():
-                pulseaudio_available = self.setup_pulseaudio_for_meeting_capture()
-        
-        # If we successfully set up PulseAudio ChromeSink, use it directly
-        # Don't test it because there might not be active audio streams yet
-        if pulseaudio_available:
-            logger.info("PulseAudio ChromeSink setup successful, using ChromeSink.monitor for meeting audio")
+                # Try to create ChromeSink if missing
+                self.setup_pulseaudio_for_meeting_capture()
+
+        # If FORCE_PULSE is set, prefer ChromeSink but only if it actually exists
+        if force_pulse:
+            if self._wait_for_chromesink_monitor(timeout_sec=5):
+                logger.info("Using PulseAudio ChromeSink.monitor for meeting audio")
+                return ["-thread_queue_size", "4096", "-f", "pulse", "-i", "ChromeSink.monitor"]
+            else:
+                logger.warning("FORCE_PULSE requested but ChromeSink.monitor not found; falling back to Pulse default")
+                # fall through to default detection
+
+        # If ChromeSink exists (from earlier setup), use it
+        if self._check_pulseaudio_chromesink_exists() and self._wait_for_chromesink_monitor(timeout_sec=2):
+            logger.info("Found existing ChromeSink.monitor, using it for meeting audio")
             return ["-thread_queue_size", "4096", "-f", "pulse", "-i", "ChromeSink.monitor"]
-        
-        # Check if PulseAudio is available and ChromeSink exists (from previous setup)
-        if self._check_pulseaudio_chromesink_exists():
-            logger.info("Found existing ChromeSink, using ChromeSink.monitor for meeting audio")
-            return ["-thread_queue_size", "4096", "-f", "pulse", "-i", "ChromeSink.monitor"]
-            
-        # Fall back to traditional audio detection only if PulseAudio setup failed
+
+        # Fallbacks
         logger.warning("PulseAudio ChromeSink not available, falling back to traditional audio sources")
         audio_methods = [
-            # Method 1: Try PulseAudio default if available
             (["-thread_queue_size", "4096", "-f", "pulse", "-i", "default"], "PulseAudio default"),
-            
-            # Method 2: Try default ALSA device
-            (["-thread_queue_size", "4096", "-f", "alsa", "-i", "default"], "ALSA default"),
-            
-            # Method 3: Try specific ALSA device
-            (["-thread_queue_size", "4096", "-f", "alsa", "-i", "hw:0"], "ALSA hw:0"),
+            (["-thread_queue_size", "4096", "-f", "alsa",  "-i", "default"], "ALSA default"),
+            (["-thread_queue_size", "4096", "-f", "alsa",  "-i", "hw:0"],    "ALSA hw:0"),
         ]
-        
         for audio_cmd, description in audio_methods:
             if self._test_audio_input(audio_cmd, description):
                 logger.info(f"Using fallback audio input method: {description}")
                 return audio_cmd
-                
+
         logger.warning("No working audio input found, will record video only")
         return None
 
@@ -99,6 +93,45 @@ class ScreenAndAudioRecorder:
         except:
             pass
         return False
+
+    def _wait_for_chromesink_monitor(self, timeout_sec=5):
+        """Poll PulseAudio for ChromeSink.monitor to exist."""
+        end = time.time() + timeout_sec
+        while time.time() < end:
+            try:
+                result = subprocess.run(["pactl", "list", "short", "sources"],
+                                        capture_output=True, timeout=3, text=True)
+                if result.returncode == 0 and "ChromeSink.monitor" in result.stdout:
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.25)
+        return False
+
+    def attempt_move_chrome_to_sink(self):
+        """Optional: move any active Chrome sink inputs onto ChromeSink."""
+        try:
+            # List sink inputs: index, sink, driver, sample_spec, channel_map, owner_module, client, tty, flags, properties...
+            out = subprocess.run(["pactl", "list", "short", "sink-inputs"], capture_output=True, text=True, timeout=5)
+            if out.returncode != 0 or not out.stdout.strip():
+                return
+            lines = out.stdout.strip().splitlines()
+            for line in lines:
+                # e.g.: "42\t1\t... application.name = \"Google Chrome\" ..."
+                # We don't always get properties here; fallback to moving all if in doubt.
+                parts = line.split('\t')
+                if not parts:
+                    continue
+                idx = parts[0].strip()
+                # Try to be conservative: only move if it's Chrome-ish
+                props = subprocess.run(["pactl", "list", "sink-inputs"], capture_output=True, text=True, timeout=5).stdout
+                if f"Sink Input #{idx}" in props:
+                    # Rough check for Chrome
+                    if any(s in props for s in [f"Sink Input #{idx}\n", "application.name = \"Google Chrome\"",
+                                                "application.name = \"Chromium\"", "media.role = \"music\""]):
+                        subprocess.run(["pactl", "move-sink-input", idx, "ChromeSink"], check=False, timeout=5)
+        except Exception:
+            pass
     
     def _test_audio_input(self, audio_cmd, description):
         """Test if a specific audio input configuration works"""
@@ -315,11 +348,11 @@ class ScreenAndAudioRecorder:
                     "ffmpeg", "-y", "-thread_queue_size", "4096", 
                     "-framerate", "30", 
                     "-video_size", f"{self.screen_dimensions[0]}x{self.screen_dimensions[1]}", 
-                    "-f", "x11grab", "-draw_mouse", "0", "-probesize", "32", "-i", display_var,
+                    "-f", "x11grab", "-draw_mouse", "0", "-probesize", "500k", "-i", display_var,
                 ] + audio_options + [
                     "-vf", f"crop={self.recording_dimensions[0]}:{self.recording_dimensions[1]}:10:10", 
                     "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", "30", 
-                    "-c:a", "aac", "-strict", "experimental", "-b:a", "128k", 
+                    "-c:a", "aac", "-b:a", "128k", 
                     self.file_location
                 ]
                 
@@ -336,7 +369,7 @@ class ScreenAndAudioRecorder:
                 "ffmpeg", "-y", "-thread_queue_size", "4096", 
                 "-framerate", "30", 
                 "-video_size", f"{self.screen_dimensions[0]}x{self.screen_dimensions[1]}", 
-                "-f", "x11grab", "-draw_mouse", "0", "-probesize", "32", "-i", display_var,
+                "-f", "x11grab", "-draw_mouse", "0", "-probesize", "500k", "-i", display_var,
                 "-vf", f"crop={self.recording_dimensions[0]}:{self.recording_dimensions[1]}:10:10", 
                 "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", "30", 
                 self.file_location
@@ -426,7 +459,8 @@ class ScreenAndAudioRecorder:
             "audio device",
             "default:",
             "cannot open audio device",
-            "no such file or directory"
+            "no such file or directory",
+            "chromesink.monitor",              # <— add this
         ]
         
         return any(pattern in error_output_lower for pattern in audio_error_patterns)
