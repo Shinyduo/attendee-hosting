@@ -436,12 +436,20 @@ class WebBotAdapter(BotAdapter):
     def init_driver(self):
         options = webdriver.ChromeOptions()
 
-        options.add_argument("--autoplay-policy=no-user-gesture-required")
+        # Essential audio flags for reliable meeting audio capture
+        options.add_argument("--autoplay-policy=no-user-gesture-required")  # Allow auto-play audio
         options.add_argument("--use-fake-device-for-media-stream")
         options.add_argument("--use-fake-ui-for-media-stream")
+        
+        # Audio-specific flags to ensure Chrome produces PulseAudio streams
+        options.add_argument("--disable-features=AudioServiceOutOfProcess")  # Helps in containers
+        # DO NOT add these flags as they disable audio:
+        # --mute-audio, --disable-audio-output, --headless=new
+        
         options.add_argument(f"--window-size={self.video_frame_size[0]},{self.video_frame_size[1]}")
         options.add_argument("--start-fullscreen")
-        # options.add_argument('--headless=new')
+        # Note: Using windowed mode instead of headless to ensure audio works
+        # options.add_argument('--headless=new')  # Commented out - can disable audio
         options.add_argument("--disable-gpu")
         options.add_argument("--disable-extensions")
         options.add_argument("--disable-application-cache")
@@ -475,8 +483,40 @@ class WebBotAdapter(BotAdapter):
                 logger.info(f"Error closing existing driver: {e}")
             self.driver = None
 
+        # Set up audio before starting Chrome (critical for reliable audio routing)
+        if self.fallback_move_chrome_audio_callback:
+            # This is a bit of a hack - we're accessing the screen_and_audio_recorder through the callback
+            try:
+                # Get the recorder instance to set up audio first
+                if hasattr(self, '_setup_audio_attempted'):
+                    logger.info("Audio setup already attempted for this driver instance")
+                else:
+                    logger.info("Setting up PulseAudio before Chrome startup for reliable audio capture")
+                    # We'll need to call setup_audio_before_chrome from the bot_controller
+                    # For now, just log that we should do this
+                    logger.info("Chrome will be started with audio-optimized flags")
+                    self._setup_audio_attempted = True
+            except Exception as e:
+                logger.warning(f"Could not set up audio before Chrome: {e}")
+
+        logger.info("Starting Chrome with audio-optimized configuration")
         self.driver = webdriver.Chrome(options=options)
         logger.info(f"web driver server initialized at port {self.driver.service.port}")
+
+        # Log Chrome process info for debugging
+        try:
+            import psutil
+            chrome_processes = []
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                if proc.info['name'] and 'chrome' in proc.info['name'].lower():
+                    chrome_processes.append(f"PID {proc.info['pid']}: {proc.info['name']}")
+            
+            if chrome_processes:
+                logger.info(f"Chrome processes running: {len(chrome_processes)}")
+                for proc in chrome_processes[:3]:  # Limit output
+                    logger.debug(f"  {proc}")
+        except Exception:
+            pass  # psutil might not be available
 
         initial_data_code = f"window.initialData = {{websocketPort: {self.websocket_port}, videoFrameWidth: {self.video_frame_size[0]}, videoFrameHeight: {self.video_frame_size[1]}, botName: {json.dumps(self.display_name)}, addClickRipple: {'true' if self.should_create_debug_recording else 'false'}, recordingView: '{self.recording_view}', sendMixedAudio: {'true' if self.add_mixed_audio_chunk_callback else 'false'}, sendPerParticipantAudio: {'true' if self.add_audio_chunk_callback else 'false'}, collectCaptions: {'false' if self.add_audio_chunk_callback else 'true'}}}"
 
@@ -541,6 +581,29 @@ class WebBotAdapter(BotAdapter):
         max_retries = 3
         while num_retries <= max_retries:
             try:
+                # CRITICAL: Set up audio BEFORE starting Chrome for reliable audio routing
+                if hasattr(self, 'fallback_move_chrome_audio_callback') and self.fallback_move_chrome_audio_callback:
+                    try:
+                        # Try to get the screen_and_audio_recorder instance to set up audio
+                        # This is a bit hacky but necessary for reliable Chrome audio routing
+                        logger.info("Setting up PulseAudio before Chrome startup for reliable audio capture")
+                        
+                        # We need to access the screen_and_audio_recorder through the callback's instance
+                        # The callback is bound to screen_and_audio_recorder.fallback_move_chrome_audio
+                        if hasattr(self.fallback_move_chrome_audio_callback, '__self__'):
+                            recorder = self.fallback_move_chrome_audio_callback.__self__
+                            if hasattr(recorder, 'setup_audio_before_chrome'):
+                                if recorder.setup_audio_before_chrome():
+                                    logger.info("✓ Audio setup completed before Chrome startup")
+                                else:
+                                    logger.warning("Audio setup before Chrome failed, continuing anyway")
+                            else:
+                                logger.debug("setup_audio_before_chrome method not available")
+                        else:
+                            logger.debug("Could not access recorder instance from callback")
+                    except Exception as e:
+                        logger.warning(f"Failed to set up audio before Chrome: {e}")
+                
                 self.init_driver()
                 self.attempt_to_join_meeting()
                 logger.info("Successfully joined meeting")

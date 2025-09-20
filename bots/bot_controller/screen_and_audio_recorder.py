@@ -116,23 +116,32 @@ class ScreenAndAudioRecorder:
 
     def export_pulse_env_for_children(self):
         """
-        Set PulseAudio environment variables so Chrome, chromedriver, and FFmpeg 
-        all use the same PulseAudio server.
-        Call this BEFORE starting any audio processes.
+        Set comprehensive PulseAudio environment variables for Chrome process.
+        Call this BEFORE starting any audio processes to ensure proper routing.
         """
         try:
             uid = os.getuid()
-            pulse_runtime_path = f"/run/user/{uid}/pulse"
-            pulse_server = f"unix:/run/user/{uid}/pulse/native"
+            xdg_runtime_dir = f"/run/user/{uid}"
+            pulse_runtime_dir = f"{xdg_runtime_dir}/pulse"
+            pulse_server = f"unix:{pulse_runtime_dir}/native"
             
-            # Create runtime directory if it doesn't exist
-            os.makedirs(pulse_runtime_path, exist_ok=True)
+            # Create runtime directories if they don't exist
+            os.makedirs(xdg_runtime_dir, exist_ok=True)
+            os.makedirs(pulse_runtime_dir, exist_ok=True)
             
-            # Set environment variables for child processes
-            os.environ['PULSE_RUNTIME_PATH'] = pulse_runtime_path
-            os.environ['PULSE_SERVER'] = pulse_server
+            # Set comprehensive environment variables for child processes
+            env_vars = {
+                'XDG_RUNTIME_DIR': xdg_runtime_dir,
+                'PULSE_RUNTIME_PATH': pulse_runtime_dir,
+                'PULSE_RUNTIME_DIR': pulse_runtime_dir, 
+                'PULSE_SERVER': pulse_server,
+                'PULSE_SINK': 'ChromeSink',  # Force new clients to use ChromeSink
+            }
             
-            logger.info(f"Set PulseAudio environment: PULSE_SERVER={pulse_server}")
+            for key, value in env_vars.items():
+                os.environ[key] = value
+                logger.info(f"Set {key}={value}")
+            
             return True
             
         except Exception as e:
@@ -207,11 +216,42 @@ class ScreenAndAudioRecorder:
         try:
             logger.info("Attempting to move Chrome audio streams to ChromeSink")
             
+            # First run diagnostics if no streams found
+            short_result = subprocess.run(["pactl", "list", "short", "sink-inputs"], 
+                                        capture_output=True, text=True, timeout=5)
+            
+            if short_result.returncode != 0:
+                logger.error("Failed to list sink inputs")
+                return False
+                
+            if not short_result.stdout.strip():
+                logger.warning("No active sink inputs found - running diagnostics")
+                self.diagnose_chrome_audio_routing()
+                return False
+            
+            # Log all sink inputs for debugging
+            logger.info("Current sink inputs:")
+            chrome_found = False
+            for line in short_result.stdout.strip().split('\n'):
+                if line.strip():
+                    logger.info(f"  {line}")
+                    if any(chrome_word in line.lower() for chrome_word in ['chrome', 'chromium']):
+                        chrome_found = True
+            
+            if not chrome_found:
+                logger.warning("No Chrome sink inputs found in short list - Chrome may not be producing audio")
+                logger.info("This usually means:")
+                logger.info("  1. Chrome was started before ChromeSink existed")
+                logger.info("  2. Chrome has audio disabled/muted")
+                logger.info("  3. Meet tab is muted or no remote audio to play")
+                logger.info("  4. Chrome didn't connect to PulseAudio properly")
+                return False
+            
             # Get detailed sink inputs with properties
             result = subprocess.run(["pactl", "list", "sink-inputs"], 
                                   capture_output=True, text=True, timeout=5)
-            if result.returncode != 0 or not result.stdout.strip():
-                logger.debug("No active sink inputs found")
+            if result.returncode != 0:
+                logger.error("Failed to get detailed sink input list")
                 return False
             
             import re
@@ -228,15 +268,25 @@ class ScreenAndAudioRecorder:
                     
                 sink_input_id = id_match.group(1)
                 
-                # Check if this is Chrome
+                # Enhanced Chrome detection patterns
                 chrome_indicators = [
                     'application.name = "Google Chrome"',
                     'application.name = "Chromium"',
-                    'application.name = "Chrome"'
+                    'application.name = "Chrome"',
+                    'application.name = "chrome"',
+                    'application.name = "chromium"',
+                    'application.process.binary = "chrome"',
+                    'application.process.binary = "chromium"'
                 ]
                 
                 if any(indicator in block for indicator in chrome_indicators):
-                    logger.info(f"Moving Chrome sink input #{sink_input_id} to ChromeSink")
+                    logger.info(f"Found Chrome sink input #{sink_input_id}, moving to ChromeSink")
+                    
+                    # Log some details about this sink input
+                    for line in block.split('\n')[:10]:
+                        if any(key in line for key in ['application.name', 'application.process.binary', 'media.role']):
+                            logger.info(f"  {line.strip()}")
+                    
                     move_result = subprocess.run(
                         ["pactl", "move-sink-input", sink_input_id, "ChromeSink"], 
                         capture_output=True, timeout=5
@@ -244,9 +294,9 @@ class ScreenAndAudioRecorder:
                     
                     if move_result.returncode == 0:
                         moved_count += 1
-                        logger.info(f"Successfully moved sink input #{sink_input_id} to ChromeSink")
+                        logger.info(f"✓ Successfully moved Chrome sink input #{sink_input_id} to ChromeSink")
                     else:
-                        logger.warning(f"Failed to move sink input #{sink_input_id}: {move_result.stderr.decode()}")
+                        logger.warning(f"✗ Failed to move sink input #{sink_input_id}: {move_result.stderr.decode()}")
             
             if moved_count > 0:
                 logger.info(f"Moved {moved_count} Chrome audio streams to ChromeSink")
@@ -391,6 +441,150 @@ class ScreenAndAudioRecorder:
         
         logger.warning("Fallback Chrome audio routing failed")
         return False
+
+    def diagnose_chrome_audio_routing(self):
+        """
+        Comprehensive diagnostics for Chrome audio routing issues.
+        Call this when Chrome audio streams are not found.
+        """
+        logger.info("=== Chrome Audio Routing Diagnostics ===")
+        
+        try:
+            # 1. Check PulseAudio status
+            result = subprocess.run(["pactl", "info"], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                logger.info("✓ PulseAudio is running")
+            else:
+                logger.error("✗ PulseAudio is not running")
+                return
+            
+            # 2. Check ChromeSink exists
+            sinks = subprocess.run(["pactl", "list", "short", "sinks"], capture_output=True, text=True, timeout=5)
+            if sinks.returncode == 0:
+                chromesink_found = "ChromeSink" in sinks.stdout
+                logger.info(f"{'✓' if chromesink_found else '✗'} ChromeSink exists: {chromesink_found}")
+                if chromesink_found:
+                    for line in sinks.stdout.strip().split('\n'):
+                        if 'ChromeSink' in line:
+                            logger.info(f"  ChromeSink: {line}")
+                else:
+                    logger.info("Available sinks:")
+                    for line in sinks.stdout.strip().split('\n'):
+                        logger.info(f"  {line}")
+            
+            # 3. Check ChromeSink.monitor exists
+            sources = subprocess.run(["pactl", "list", "short", "sources"], capture_output=True, text=True, timeout=5)
+            if sources.returncode == 0:
+                monitor_found = "ChromeSink.monitor" in sources.stdout
+                logger.info(f"{'✓' if monitor_found else '✗'} ChromeSink.monitor exists: {monitor_found}")
+                if monitor_found:
+                    for line in sources.stdout.strip().split('\n'):
+                        if 'ChromeSink.monitor' in line:
+                            logger.info(f"  Monitor: {line}")
+            
+            # 4. Check active sink inputs (Chrome streams)
+            sink_inputs = subprocess.run(["pactl", "list", "short", "sink-inputs"], capture_output=True, text=True, timeout=5)
+            if sink_inputs.returncode == 0:
+                chrome_streams = []
+                all_streams = []
+                for line in sink_inputs.stdout.strip().split('\n'):
+                    if line.strip():
+                        all_streams.append(line)
+                        if any(chrome_word in line.lower() for chrome_word in ['chrome', 'chromium']):
+                            chrome_streams.append(line)
+                
+                logger.info(f"{'✓' if chrome_streams else '✗'} Chrome sink inputs found: {len(chrome_streams)}")
+                if chrome_streams:
+                    for stream in chrome_streams:
+                        logger.info(f"  Chrome stream: {stream}")
+                else:
+                    logger.info(f"All active sink inputs ({len(all_streams)}):")
+                    for stream in all_streams[:10]:  # Limit to first 10
+                        logger.info(f"  {stream}")
+            
+            # 5. Check PulseAudio clients
+            clients = subprocess.run(["pactl", "list", "clients"], capture_output=True, text=True, timeout=5)
+            if clients.returncode == 0:
+                chrome_clients = []
+                for line in clients.stdout.split('\n'):
+                    if any(chrome_word in line.lower() for chrome_word in ['chrome', 'chromium']):
+                        chrome_clients.append(line.strip())
+                
+                logger.info(f"{'✓' if chrome_clients else '✗'} Chrome PulseAudio clients: {len(chrome_clients)}")
+                for client in chrome_clients[:5]:  # Limit output
+                    logger.info(f"  {client}")
+            
+            # 6. Check environment variables
+            env_vars = ['PULSE_SERVER', 'PULSE_SINK', 'XDG_RUNTIME_DIR', 'PULSE_RUNTIME_PATH']
+            logger.info("Environment variables:")
+            for var in env_vars:
+                value = os.environ.get(var, 'NOT SET')
+                logger.info(f"  {var}={value}")
+            
+        except Exception as e:
+            logger.error(f"Diagnostic failed: {e}")
+        
+        logger.info("=== End Chrome Audio Diagnostics ===")
+
+    def test_chrome_audio_setup(self):
+        """
+        Test if Chrome audio setup is working by playing a test sound.
+        Returns True if test sound can be recorded from ChromeSink.monitor.
+        """
+        try:
+            logger.info("Testing Chrome audio setup with test sound")
+            
+            # Play a test sound to ChromeSink
+            test_cmd = [
+                "paplay", "--device=ChromeSink", "/usr/share/sounds/alsa/Front_Center.wav"
+            ]
+            
+            # Try to find a test sound file
+            test_files = [
+                "/usr/share/sounds/alsa/Front_Center.wav",
+                "/usr/share/sounds/sound-icons/bell.wav", 
+                "/usr/share/sounds/generic.wav"
+            ]
+            
+            test_file = None
+            for f in test_files:
+                if os.path.exists(f):
+                    test_file = f
+                    break
+            
+            if not test_file:
+                logger.warning("No test sound file found, generating tone")
+                # Generate a test tone using speaker-test
+                result = subprocess.run([
+                    "timeout", "2", "speaker-test", "-t", "sine", "-f", "1000", "-l", "1", "-D", "ChromeSink"
+                ], capture_output=True, timeout=5)
+                if result.returncode == 0:
+                    logger.info("✓ Generated test tone to ChromeSink")
+                else:
+                    logger.warning("Could not generate test tone")
+                    return False
+            else:
+                result = subprocess.run([
+                    "paplay", "--device=ChromeSink", test_file
+                ], timeout=5)
+                if result.returncode == 0:
+                    logger.info(f"✓ Played test sound to ChromeSink: {test_file}")
+                else:
+                    logger.warning(f"Could not play test sound: {test_file}")
+                    return False
+            
+            # Quick check if we can record from ChromeSink.monitor
+            time.sleep(0.5)  # Let the sound settle
+            if self.monitor_has_signal(timeout_sec=2):
+                logger.info("✓ ChromeSink.monitor has audio signal - setup working!")
+                return True
+            else:
+                logger.warning("✗ ChromeSink.monitor has no signal after test")
+                return False
+                
+        except Exception as e:
+            logger.warning(f"Audio setup test failed: {e}")
+            return False
     
     def _test_audio_input(self, audio_cmd, description):
         """Test if a specific audio input configuration works"""
