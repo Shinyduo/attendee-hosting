@@ -8,11 +8,14 @@ ENV cwd=/$project
 # Force PulseAudio in container environments for meeting audio capture
 ENV FORCE_PULSE=1
 
-# Set up PulseAudio environment for non-root user (UID 1000)
+# Set up comprehensive PulseAudio environment for Chrome audio routing
+ENV XDG_RUNTIME_DIR=/run/user/1000
+ENV PULSE_RUNTIME_DIR=/run/user/1000/pulse
 ENV PULSE_RUNTIME_PATH=/run/user/1000/pulse
 ENV PULSE_SERVER=unix:/run/user/1000/pulse/native
+ENV PULSE_SINK=ChromeSink
 
-# Create PulseAudio runtime directory
+# Create PulseAudio runtime directory with proper ownership
 RUN mkdir -p /run/user/1000/pulse && chown -R 1000:1000 /run/user/1000
 
 WORKDIR $cwd
@@ -62,11 +65,31 @@ RUN apt-get install -y xvfb x11-xkb-utils xfonts-100dpi xfonts-75dpi xfonts-scal
 RUN wget -q http://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_134.0.6998.88-1_amd64.deb
 RUN apt-get install -y ./google-chrome-stable_134.0.6998.88-1_amd64.deb
 
-# Install ALSA
-RUN apt-get update && apt-get install -y libasound2 libasound2-plugins alsa alsa-utils alsa-oss
+# Install ALSA with Pulse bridge for reliable Chrome audio routing
+RUN apt-get update && apt-get install -y \
+    libasound2 \
+    libasound2-plugins \
+    alsa-utils \
+    alsa-oss
 
-# Install Pulseaudio
-RUN apt-get install -y  pulseaudio pulseaudio-utils ffmpeg
+# Install Pulseaudio with comprehensive audio support
+RUN apt-get install -y \
+    pulseaudio \
+    pulseaudio-utils \
+    libpulse0 \
+    ffmpeg
+
+# Configure ALSA to route to PulseAudio by default (critical for Chrome audio)
+RUN printf '%s\n' \
+    'pcm.!default { type pulse }' \
+    'ctl.!default { type pulse }' > /etc/asound.conf
+
+# Also create user-specific ALSA config for UID 1000
+RUN mkdir -p /home/nonroot/.asoundrc.d && \
+    printf '%s\n' \
+        'pcm.!default { type pulse }' \
+        'ctl.!default { type pulse }' > /home/nonroot/.asoundrc && \
+    chown -R 1000:1000 /home/nonroot
 
 # Install Linux Kernel Dev
 RUN apt-get update && apt-get install -y linux-libc-dev

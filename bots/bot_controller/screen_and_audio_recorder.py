@@ -482,7 +482,8 @@ class ScreenAndAudioRecorder:
                         if 'ChromeSink.monitor' in line:
                             logger.info(f"  Monitor: {line}")
             
-            # 4. Check active sink inputs (Chrome streams)
+            # 4. Check active sink inputs (Chrome streams) with JSON format for better parsing
+            logger.info("Checking Chrome sink inputs with detailed JSON output...")
             sink_inputs = subprocess.run(["pactl", "list", "short", "sink-inputs"], capture_output=True, text=True, timeout=5)
             if sink_inputs.returncode == 0:
                 chrome_streams = []
@@ -501,6 +502,40 @@ class ScreenAndAudioRecorder:
                     logger.info(f"All active sink inputs ({len(all_streams)}):")
                     for stream in all_streams[:10]:  # Limit to first 10
                         logger.info(f"  {stream}")
+                
+                # Try JSON format for more detailed Chrome detection (newer pactl versions)
+                try:
+                    json_result = subprocess.run(["pactl", "-f", "json", "list", "sink-inputs"], 
+                                               capture_output=True, text=True, timeout=5)
+                    if json_result.returncode == 0:
+                        import json
+                        try:
+                            sink_data = json.loads(json_result.stdout)
+                            chrome_json_streams = []
+                            for sink in sink_data:
+                                props = sink.get('properties', {})
+                                app_name = props.get('application.name', '')
+                                if any(chrome_word in app_name.lower() for chrome_word in ['chrome', 'chromium']):
+                                    chrome_json_streams.append({
+                                        'index': sink.get('index'),
+                                        'app_name': app_name,
+                                        'sink': sink.get('sink'),
+                                        'process_binary': props.get('application.process.binary', ''),
+                                        'media_role': props.get('media.role', '')
+                                    })
+                            
+                            if chrome_json_streams:
+                                logger.info(f"✓ JSON format detected {len(chrome_json_streams)} Chrome streams:")
+                                for stream in chrome_json_streams:
+                                    logger.info(f"  Chrome #{stream['index']}: {stream['app_name']} -> {stream['sink']}")
+                            else:
+                                logger.info("✗ JSON format found no Chrome streams")
+                        except json.JSONDecodeError:
+                            logger.debug("JSON parsing failed for sink inputs")
+                    else:
+                        logger.debug("JSON format not supported by this pactl version")
+                except:
+                    logger.debug("pactl JSON format not available")
             
             # 5. Check PulseAudio clients
             clients = subprocess.run(["pactl", "list", "clients"], capture_output=True, text=True, timeout=5)
@@ -515,11 +550,37 @@ class ScreenAndAudioRecorder:
                     logger.info(f"  {client}")
             
             # 6. Check environment variables
-            env_vars = ['PULSE_SERVER', 'PULSE_SINK', 'XDG_RUNTIME_DIR', 'PULSE_RUNTIME_PATH']
+            env_vars = ['PULSE_SERVER', 'PULSE_SINK', 'XDG_RUNTIME_DIR', 'PULSE_RUNTIME_PATH', 'PULSE_RUNTIME_DIR']
             logger.info("Environment variables:")
             for var in env_vars:
                 value = os.environ.get(var, 'NOT SET')
                 logger.info(f"  {var}={value}")
+            
+            # 7. Test ALSA→Pulse bridge configuration
+            logger.info("Testing ALSA→Pulse bridge...")
+            try:
+                # Check if ALSA is configured to use Pulse
+                alsa_config_check = subprocess.run(["aplay", "-l"], capture_output=True, text=True, timeout=5)
+                if alsa_config_check.returncode == 0:
+                    logger.info("✓ ALSA devices available")
+                else:
+                    logger.warning("✗ ALSA device listing failed")
+                
+                # Check ALSA configuration
+                asound_paths = ['/etc/asound.conf', '/home/nonroot/.asoundrc']
+                for path in asound_paths:
+                    if os.path.exists(path):
+                        with open(path, 'r') as f:
+                            content = f.read()
+                            if 'type pulse' in content:
+                                logger.info(f"✓ ALSA→Pulse bridge configured in {path}")
+                            else:
+                                logger.warning(f"✗ No Pulse config found in {path}")
+                    else:
+                        logger.debug(f"ALSA config file not found: {path}")
+                        
+            except Exception as e:
+                logger.warning(f"ALSA bridge test failed: {e}")
             
         except Exception as e:
             logger.error(f"Diagnostic failed: {e}")
