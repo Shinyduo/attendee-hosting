@@ -929,10 +929,18 @@ class ScreenAndAudioRecorder:
         # Set as default
         subprocess.run(["pactl", "set-default-sink", "ChromeSink"], capture_output=True)
         
-        # 3) Verify setup
+        # 3) Verify setup including ALSA bridge
         time.sleep(1)
+        
+        # First verify ALSA→Pulse bridge is working
+        alsa_bridge_ok = self.verify_alsa_bridge_configuration()
+        if not alsa_bridge_ok:
+            logger.warning("✗ ALSA→Pulse bridge verification failed, Chrome may not connect")
+        
         if self.ensure_sink_and_monitor_exist():
             logger.info("✓ ChromeSink setup verified")
+            if alsa_bridge_ok:
+                logger.info("✓ ALSA→Pulse bridge configured - Chrome should connect to PulseAudio")
             logger.info("→ Now start Chrome, then call ensure_chrome_audio_capture()")
             return True
         else:
@@ -1046,6 +1054,74 @@ class ScreenAndAudioRecorder:
             return False
         finally:
             logger.info("=== End Quick Diagnostics ===")
+
+    def verify_alsa_bridge_configuration(self):
+        """Verify ALSA→Pulse bridge is properly configured and working"""
+        try:
+            logger.info("=== Verifying ALSA→Pulse Bridge Configuration ===")
+            
+            # 1. Check if /etc/asound.conf exists and has pulse config
+            try:
+                with open('/etc/asound.conf', 'r') as f:
+                    asound_content = f.read()
+                    has_pulse_config = 'type pulse' in asound_content
+                    logger.info(f"{'✓' if has_pulse_config else '✗'} /etc/asound.conf has pulse configuration")
+            except FileNotFoundError:
+                logger.warning("✗ /etc/asound.conf not found")
+                has_pulse_config = False
+            
+            # 2. Check if user-specific .asoundrc exists
+            asoundrc_path = os.path.expanduser('~/.asoundrc')
+            try:
+                with open(asoundrc_path, 'r') as f:
+                    asoundrc_content = f.read()
+                    has_user_config = 'type pulse' in asoundrc_content
+                    logger.info(f"{'✓' if has_user_config else '✗'} ~/.asoundrc has pulse configuration")
+            except FileNotFoundError:
+                logger.warning("✗ ~/.asoundrc not found")
+                has_user_config = False
+            
+            # 3. Test ALSA→Pulse routing by checking default ALSA device
+            try:
+                result = subprocess.run(['aplay', '-l'], capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    logger.info("✓ ALSA subsystem responding")
+                else:
+                    logger.warning("✗ ALSA subsystem not responding")
+            except Exception as e:
+                logger.warning(f"✗ ALSA test failed: {e}")
+            
+            # 4. Check if ALSA can see PulseAudio as default
+            try:
+                result = subprocess.run(['aplay', '--list-pcms'], capture_output=True, text=True, timeout=5)
+                if result.returncode == 0 and 'pulse' in result.stdout.lower():
+                    logger.info("✓ ALSA can see PulseAudio PCM devices")
+                else:
+                    logger.warning("✗ ALSA cannot see PulseAudio PCM devices")
+            except Exception as e:
+                logger.warning(f"✗ ALSA PCM test failed: {e}")
+            
+            # 5. Test if applications can route through ALSA→Pulse bridge
+            # This simulates what Chrome would do
+            try:
+                # Try to query the default device which should route to Pulse
+                result = subprocess.run(['aplay', '--dump-hw-params', '--device=default', '/dev/null'], 
+                                     capture_output=True, text=True, timeout=3)
+                if result.returncode == 0:
+                    logger.info("✓ ALSA→Pulse bridge is functional")
+                    return True
+                else:
+                    logger.warning(f"✗ ALSA→Pulse bridge test failed: {result.stderr}")
+                    return False
+            except Exception as e:
+                logger.warning(f"✗ ALSA→Pulse bridge test error: {e}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"ALSA bridge verification failed: {e}")
+            return False
+        finally:
+            logger.info("=== End ALSA Bridge Verification ===")
 
     def test_chrome_audio_setup(self):
         """
@@ -1247,17 +1323,11 @@ class ScreenAndAudioRecorder:
                 logger.info("PulseAudio is already running")
                 return True
                 
-            logger.info("Starting PulseAudio daemon with optimized settings")
-            # Start PulseAudio in daemon mode with audio-optimized settings
+            logger.info("Starting PulseAudio daemon with basic settings")
+            # Start PulseAudio in daemon mode with basic settings for maximum compatibility
             subprocess.run([
                 "pulseaudio", "-D", 
-                "--exit-idle-time=-1",  # Never exit
-                "--default-sample-format=s16le",  # Force s16 to match our setup
-                "--default-sample-rate=48000",    # Match ChromeSink rate
-                "--alternate-sample-rate=48000",  # Avoid resampling
-                "--resample-method=speex-float-1", # Fast, low-CPU resampling
-                "--avoid-resampling=yes",          # Prefer native rates
-                "--flat-volumes=no"                # Disable flat volumes (better for recording)
+                "--exit-idle-time=-1"   # Never exit - this is the only widely supported option
             ], check=True, timeout=10)
             
             # Wait a moment for it to start
@@ -1266,7 +1336,7 @@ class ScreenAndAudioRecorder:
             # Verify it's running
             result = subprocess.run(["pactl", "info"], capture_output=True, timeout=5)
             if result.returncode == 0:
-                logger.info("PulseAudio started successfully with optimized settings")
+                logger.info("PulseAudio started successfully with basic settings")
                 return True
             else:
                 logger.warning("PulseAudio failed to start properly")
