@@ -1,5 +1,6 @@
 import logging
 import os
+import random
 import time
 
 from selenium.common.exceptions import ElementNotInteractableException, NoSuchElementException, TimeoutException
@@ -20,6 +21,62 @@ class UiGoogleBlockingUsException(UiRetryableExpectedException):
 
 
 class GoogleMeetUIMethods:
+    def _human_like_delay(self, step, min_seconds=0.4, max_seconds=1.0):
+        if min_seconds < 0 or max_seconds <= 0 or max_seconds < min_seconds:
+            logger.debug(
+                "Skipping human-like delay for %s due to invalid bounds %s-%s",
+                step,
+                min_seconds,
+                max_seconds,
+            )
+            return
+
+        delay = random.uniform(min_seconds, max_seconds)
+        logger.info("Human-like pause for %s: %.2fs", step, delay)
+        time.sleep(delay)
+
+    def _move_mouse_like_human(self, element, step):
+        if not element:
+            return
+
+        try:
+            actions = ActionChains(self.driver)
+            actions.move_to_element(element)
+            actions.pause(random.uniform(0.1, 0.3))
+            offset_x = random.randint(-6, 6)
+            offset_y = random.randint(-4, 4)
+            if offset_x or offset_y:
+                actions.move_by_offset(offset_x, offset_y)
+                actions.pause(random.uniform(0.05, 0.2))
+            actions.perform()
+            logger.info(
+                "Performed human-like mouse movement for %s with offsets (%s, %s)",
+                step,
+                offset_x,
+                offset_y,
+            )
+        except Exception as e:
+            logger.debug("Could not simulate mouse movement for %s: %s", step, e)
+
+    def _prepare_element_for_interaction(self, element, step):
+        if element is None:
+            logger.debug("Skipping human-like preparation for %s because element was None", step)
+            return
+
+        self._human_like_delay(f"{step}_pre_hover", 0.2, 0.6)
+        self._move_mouse_like_human(element, step)
+        self._human_like_delay(f"{step}_pre_click", 0.1, 0.4)
+
+    def _type_text_like_human(self, element, text, step):
+        if not text:
+            logger.info("Skipping human-like typing for %s because no text was provided", step)
+            return
+
+        logger.info("Typing text with human cadence for %s", step)
+        for character in text:
+            element.send_keys(character)
+            time.sleep(random.uniform(0.05, 0.18))
+
     def locate_element(self, step, condition, wait_time_seconds=60):
         try:
             element = WebDriverWait(self.driver, wait_time_seconds).until(condition)
@@ -55,6 +112,7 @@ class GoogleMeetUIMethods:
     # Do it via javascript to avoid the element not being interactable exception
     def click_element_forcefully(self, element, step):
         try:
+            self._prepare_element_for_interaction(element, step)
             self.driver.execute_script("arguments[0].click();", element)
         except Exception as e:
             logger.info(f"Error occurred when forcefully clicking element for step {step}, will retry")
@@ -62,6 +120,7 @@ class GoogleMeetUIMethods:
 
     def click_element(self, element, step):
         try:
+            self._prepare_element_for_interaction(element, step)
             element.click()
         except Exception as e:
             logger.info(f"Error occurred when clicking element for step {step}, will retry")
@@ -151,7 +210,8 @@ class GoogleMeetUIMethods:
             try:
                 name_input = WebDriverWait(self.driver, 1).until(EC.presence_of_element_located((By.CSS_SELECTOR, 'input[type="text"][aria-label="Your name"]')))
                 logger.info("name input found")
-                name_input.send_keys(self.display_name)
+                self._human_like_delay("name_input_before_typing", 0.6, 1.4)
+                self._type_text_like_human(name_input, self.display_name, "name_input")
                 return
             except TimeoutException as e:
                 self.look_for_blocked_element("name_input")
@@ -399,8 +459,10 @@ class GoogleMeetUIMethods:
 
         self.check_if_meeting_is_found()
 
+        self._human_like_delay("pre_fill_name", 0.8, 1.6)
         self.fill_out_name_input()
 
+        self._human_like_delay("pre_turn_off_media", 0.5, 1.2)
         self.turn_off_media_inputs()
 
         logger.info("Waiting for the 'Ask to join' or 'Join now' button...")
@@ -410,10 +472,13 @@ class GoogleMeetUIMethods:
             wait_time_seconds=60,
         )
         logger.info("Clicking the join button...")
+        self._human_like_delay("join_button_pre_click", 1.0, 2.5)
         self.click_element(join_button, "join_button")
 
+        self._human_like_delay("post_join_before_captions", 0.6, 1.3)
         self.click_captions_button()
 
+        self._human_like_delay("post_join_wait_for_host", 0.5, 1.0)
         self.wait_for_host_if_needed()
 
         self.set_layout(layout_to_select)
