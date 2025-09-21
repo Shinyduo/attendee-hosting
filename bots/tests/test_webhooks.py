@@ -1,10 +1,11 @@
 import uuid
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 from django.contrib.messages.storage.fallback import FallbackStorage
 from django.http import Http404, HttpRequest
 from django.http.request import QueryDict
-from django.test import TransactionTestCase
+from django.test import TestCase, TransactionTestCase
+from django.utils import timezone
 
 from accounts.models import User
 from bots.models import (
@@ -12,12 +13,18 @@ from bots.models import (
     BotStates,
     Organization,
     Project,
+    Recording,
+    RecordingTypes,
+    TranscriptionProviders,
+    TranscriptionTypes,
     WebhookDeliveryAttempt,
     WebhookDeliveryAttemptStatus,
     WebhookSecret,
     WebhookSubscription,
     WebhookTriggerTypes,
 )
+from bots.webhook_payloads import recording_webhook_payload
+from bots.bot_controller.bot_controller import BotController
 from bots.projects_views import CreateWebhookView, DeleteWebhookView, ProjectWebhooksView
 from bots.tasks.deliver_webhook_task import deliver_webhook
 from bots.webhook_utils import sign_payload, verify_signature
@@ -453,3 +460,61 @@ class WebhookDeliveryTest(TransactionTestCase):
         # Test that triggering a webhook for a transcript update does go through, since it uses the project-level webhook
         num_attempts = trigger_webhook(webhook_trigger_type=WebhookTriggerTypes.TRANSCRIPT_UPDATE, bot=self.bot, payload=test_payload)
         self.assertEqual(num_attempts, 1)
+
+
+class RecordingReadyWebhookTest(TestCase):
+    def setUp(self):
+        self.organization = Organization.objects.create(name="Recording Org")
+        self.project = Project.objects.create(name="Recording Project", organization=self.organization)
+        self.bot = Bot.objects.create(
+            name="Recorder",
+            meeting_url="https://zoom.us/j/123456789",
+            state=BotStates.READY,
+            project=self.project,
+            settings={},
+        )
+
+        self.recording = Recording.objects.create(
+            bot=self.bot,
+            recording_type=RecordingTypes.AUDIO_AND_VIDEO,
+            transcription_type=TranscriptionTypes.NON_REALTIME,
+            transcription_provider=TranscriptionProviders.DEEPGRAM,
+            is_default_recording=True,
+        )
+
+    @patch("bots.bot_controller.bot_controller.trigger_webhook")
+    @patch("bots.bot_controller.bot_controller.recording_webhook_payload")
+    def test_recording_ready_webhook_fires_when_file_saved(self, mock_payload, mock_trigger):
+        payload = {"recording_url": "https://example.com/recording"}
+        mock_payload.return_value = payload
+
+        controller = BotController.__new__(BotController)
+        controller.bot_in_db = self.bot
+        controller.get_first_buffer_timestamp_ms = lambda: 123
+
+        controller.recording_file_saved("recordings/example.webm")
+
+        recording = Recording.objects.get(pk=self.recording.pk)
+        self.assertEqual(recording.file.name, "recordings/example.webm")
+        self.assertEqual(recording.first_buffer_timestamp_ms, 123)
+
+        mock_payload.assert_called_once_with(recording)
+        mock_trigger.assert_called_once_with(
+            webhook_trigger_type=WebhookTriggerTypes.RECORDING_READY,
+            bot=self.bot,
+            payload=payload,
+        )
+
+    def test_recording_webhook_payload_contains_expected_fields(self):
+        self.recording.file = "recordings/example.webm"
+        self.recording.completed_at = timezone.now()
+
+        with patch.object(Recording, "url", new_callable=PropertyMock) as mock_url:
+            mock_url.return_value = "https://example.com/recording"
+            payload = recording_webhook_payload(self.recording)
+
+        self.assertEqual(payload["bot_id"], self.bot.object_id)
+        self.assertEqual(payload["recording_id"], self.recording.object_id)
+        self.assertEqual(payload["recording_url"], "https://example.com/recording")
+        self.assertEqual(payload["file_key"], "recordings/example.webm")
+        self.assertIsNotNone(payload["completed_at"])

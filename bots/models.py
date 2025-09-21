@@ -2089,6 +2089,7 @@ class WebhookTriggerTypes(models.IntegerChoices):
     PARTICIPANT_EVENTS_JOIN_LEAVE = 4, "Participant Join/Leave"
     CALENDAR_EVENTS_UPDATE = 5, "Calendar Events Update"
     CALENDAR_STATE_CHANGE = 6, "Calendar State Change"
+    RECORDING_READY = 7, "Recording Ready"
     # add other event types here
 
     @classmethod
@@ -2101,6 +2102,7 @@ class WebhookTriggerTypes(models.IntegerChoices):
             cls.PARTICIPANT_EVENTS_JOIN_LEAVE: "participant_events.join_leave",
             cls.CALENDAR_EVENTS_UPDATE: "calendar.events_update",
             cls.CALENDAR_STATE_CHANGE: "calendar.state_change",
+            cls.RECORDING_READY: "recording.ready",
         }
 
     @classmethod

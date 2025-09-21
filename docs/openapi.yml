@@ -1822,6 +1822,7 @@ components:
                   - transcript.update
                   - chat_messages.update
                   - participant_events.join_leave
+                  - recording.ready
                   - calendar.events_update
                   - calendar.state_change
                 description: List of webhook trigger types

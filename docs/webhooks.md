@@ -15,7 +15,7 @@ To create a project-level webhook via the UI:
 1. Click on "Settings → Webhooks" in the sidebar
 2. Click "Create Webhook" 
 3. Provide an HTTPS URL that will receive webhook events
-4. Select the triggers you want to receive notifications for (we currently have six triggers: `bot.state_change`, `transcript.update`, `chat_messages.update`, `participant_events.join_leave`, `calendar.events_update`, and `calendar.state_change`)
+4. Select the triggers you want to receive notifications for (we currently have seven triggers: `bot.state_change`, `transcript.update`, `chat_messages.update`, `participant_events.join_leave`, `recording.ready`, `calendar.events_update`, and `calendar.state_change`)
 5. Click "Create" to save your subscription
 
 ## Creating Bot-Level Webhooks
@@ -47,6 +47,7 @@ Bot-level webhooks are created via the API when creating a bot. Include a `webho
 | `transcript.update` | Real-time transcript updates during meeting |
 | `chat_messages.update` | Chat message updates in the meeting |
 | `participant_events.join_leave` | A participant joins or leaves the meeting |
+| `recording.ready` | A recording file finished uploading and is ready to download |
 | `calendar.events_update` | Calendar events have been synced and updated |
 | `calendar.state_change` | Calendar connection state has changed (connected/disconnected) |
 
@@ -71,7 +72,7 @@ When a webhook is delivered, Attendee will send an HTTP POST request to your web
   "idempotency_key": < UUID that uniquely identifies this webhook delivery >,
   "bot_id": < Id of the bot associated with the webhook delivery >,
   "bot_metadata": < Any metadata associated with the bot >,
-  "trigger": < Trigger for the webhook. Currently, the four bot-related triggers are bot.state_change, which is fired whenever the bot changes its state, transcript.update which is fired when the transcript is updated, chat_messages.update which is fired when a chat message is sent and participant_events.join_leave which is fired when a participant joins or leaves the meeting. >,
+  "trigger": < Trigger for the webhook. Currently, the bot-related triggers are bot.state_change (bot state changes), transcript.update (transcript updates), chat_messages.update (chat messages), participant_events.join_leave (participant joins/leaves), and recording.ready (recording uploads completed). >,
   "data": < Trigger-specific data >
 }
 ```
@@ -105,17 +106,21 @@ For webhooks triggered by `bot.state_change`, the `data` field contains:
 
 ### Using webhooks to know when the recording is available
 
-The most common use case for webhooks is to be notified when the meeting has ended and the recording is available. You can do this by listening for the `post_processing_completed` event type.
+Subscribe to the `recording.ready` trigger to be notified the moment the recording upload finishes and a download URL is available. This trigger fires even if post-processing continues running.
 
-The data field will look like this
+If you still prefer to wait until every transcription task is complete and the bot finishes post-processing, you can continue to listen for the `post_processing_completed` state change via the `bot.state_change` trigger.
 
-```json
+### Payload for `recording.ready` trigger
+
+For webhooks triggered by `recording.ready`, the `data` field contains information about the stored recording:
+
+```
 {
-  "new_state": "ended",
-  "old_state": "post_processing",
-  "created_at": "2023-07-15T14:30:45.123456Z",
-  "event_type": "post_processing_completed",
-  "event_sub_type": null,
+  "bot_id": <The bot identifier>,
+  "recording_id": <The recording identifier>,
+  "recording_url": <A time-limited download URL for the recording>,
+  "file_key": <The object key inside the recording bucket>,
+  "completed_at": <When the recording was finalized, if available>
 }
 ```
 

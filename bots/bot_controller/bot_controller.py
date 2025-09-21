@@ -46,7 +46,12 @@ from bots.models import (
     Utterance,
     WebhookTriggerTypes,
 )
-from bots.webhook_payloads import chat_message_webhook_payload, participant_event_webhook_payload, utterance_webhook_payload
+from bots.webhook_payloads import (
+    chat_message_webhook_payload,
+    participant_event_webhook_payload,
+    recording_webhook_payload,
+    utterance_webhook_payload,
+)
 from bots.webhook_utils import trigger_webhook
 from bots.websocket_payloads import mixed_audio_websocket_payload
 
@@ -325,6 +330,17 @@ class BotController:
         recording.file = s3_storage_key
         recording.first_buffer_timestamp_ms = self.get_first_buffer_timestamp_ms()
         recording.save()
+
+        try:
+            payload = recording_webhook_payload(recording)
+        except Exception as exc:  # pragma: no cover - log then continue cleanup
+            logger.warning("Failed to build recording webhook payload for %s: %s", recording.object_id, exc)
+        else:
+            trigger_webhook(
+                webhook_trigger_type=WebhookTriggerTypes.RECORDING_READY,
+                bot=self.bot_in_db,
+                payload=payload,
+            )
 
     def get_recording_transcription_provider(self):
         recording = Recording.objects.get(bot=self.bot_in_db, is_default_recording=True)
