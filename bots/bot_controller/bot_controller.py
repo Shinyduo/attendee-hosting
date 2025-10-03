@@ -479,8 +479,9 @@ class BotController:
             self.save_debug_recording()
 
         if self.bot_in_db.state == BotStates.POST_PROCESSING:
-            self.wait_until_all_utterances_are_terminated()
-            BotEventManager.create_event(bot=self.bot_in_db, event_type=BotEventTypes.POST_PROCESSING_COMPLETED)
+            # Don't block waiting for utterances - let the process_utterance tasks handle completion
+            # They will call check_and_complete_recording() which will trigger POST_PROCESSING_COMPLETED
+            logger.info(f"Bot {self.bot_in_db.id} entering post-processing. Utterance tasks will handle completion asynchronously.")
 
         normal_quitting_process_worked = True
 
