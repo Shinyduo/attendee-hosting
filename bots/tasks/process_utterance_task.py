@@ -8,7 +8,19 @@ from celery import shared_task
 
 logger = logging.getLogger(__name__)
 
-from bots.models import Bot, BotEventManager, BotEventTypes, Credentials, RecordingManager, RecordingTranscriptionStates, TranscriptionFailureReasons, TranscriptionProviders, Utterance, WebhookTriggerTypes
+from bots.models import (
+    Bot,
+    BotEventManager,
+    BotEventTypes,
+    BotStates,
+    Credentials,
+    RecordingManager,
+    RecordingTranscriptionStates,
+    TranscriptionFailureReasons,
+    TranscriptionProviders,
+    Utterance,
+    WebhookTriggerTypes,
+)
 from bots.utils import pcm_to_mp3
 from bots.webhook_payloads import utterance_webhook_payload
 from bots.webhook_utils import trigger_webhook
@@ -43,7 +55,7 @@ def check_and_complete_recording(recording):
     if recording.transcription_state != RecordingTranscriptionStates.IN_PROGRESS:
         logger.debug(f"Recording {recording.id} transcription already in terminal state ({recording.get_transcription_state_display()})")
         # Even if already complete/failed, trigger POST_PROCESSING_COMPLETED if needed
-        if recording.is_default_recording and recording.bot.state == Bot.BotStates.POST_PROCESSING:
+        if recording.is_default_recording and recording.bot.state == BotStates.POST_PROCESSING:
             logger.info(f"Bot {recording.bot.id} post-processing complete for recording {recording.id}")
             BotEventManager.create_event(bot=recording.bot, event_type=BotEventTypes.POST_PROCESSING_COMPLETED)
         return
@@ -84,7 +96,7 @@ def check_and_complete_recording(recording):
     
     # If this is the default recording and bot is in POST_PROCESSING, mark post-processing complete
     recording.refresh_from_db()
-    if recording.is_default_recording and recording.bot.state == Bot.BotStates.POST_PROCESSING:
+    if recording.is_default_recording and recording.bot.state == BotStates.POST_PROCESSING:
         logger.info(f"Bot {recording.bot.id} post-processing complete for recording {recording.id}")
         BotEventManager.create_event(bot=recording.bot, event_type=BotEventTypes.POST_PROCESSING_COMPLETED)
 
