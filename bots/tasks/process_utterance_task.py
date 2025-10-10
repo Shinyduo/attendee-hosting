@@ -8,7 +8,19 @@ from celery import shared_task
 
 logger = logging.getLogger(__name__)
 
-from bots.models import Credentials, RecordingManager, TranscriptionFailureReasons, TranscriptionProviders, Utterance, WebhookTriggerTypes
+from bots.models import (
+    Bot,
+    BotEventManager,
+    BotEventTypes,
+    BotStates,
+    Credentials,
+    RecordingManager,
+    RecordingTranscriptionStates,
+    TranscriptionFailureReasons,
+    TranscriptionProviders,
+    Utterance,
+    WebhookTriggerTypes,
+)
 from bots.utils import pcm_to_mp3
 from bots.webhook_payloads import utterance_webhook_payload
 from bots.webhook_utils import trigger_webhook
@@ -22,6 +34,71 @@ def is_retryable_failure(failure_data):
         TranscriptionFailureReasons.RATE_LIMIT_EXCEEDED,
         TranscriptionFailureReasons.INTERNAL_ERROR,
     ]
+
+
+def check_and_complete_recording(recording):
+    """
+    Check if all utterances for a recording are complete and mark recording as complete if so.
+    This is called by each utterance task after it completes (success or failure).
+    
+    This function is non-blocking and fast - it just checks counts and updates state if needed.
+    No sleeping or waiting involved!
+    """
+    recording.refresh_from_db()
+    
+    # Only check if recording is in a terminal state
+    if not RecordingManager.is_terminal_state(recording.state):
+        logger.debug(f"Recording {recording.id} is not in terminal state ({recording.get_state_display()}), skipping completion check")
+        return
+    
+    # Only check if transcription is still IN_PROGRESS
+    if recording.transcription_state != RecordingTranscriptionStates.IN_PROGRESS:
+        logger.debug(f"Recording {recording.id} transcription already in terminal state ({recording.get_transcription_state_display()})")
+        # Even if already complete/failed, trigger POST_PROCESSING_COMPLETED if needed
+        if recording.is_default_recording and recording.bot.state == BotStates.POST_PROCESSING:
+            logger.info(f"Bot {recording.bot.id} post-processing complete for recording {recording.id}")
+            BotEventManager.create_event(bot=recording.bot, event_type=BotEventTypes.POST_PROCESSING_COMPLETED)
+        return
+    
+    # Check if there are any utterances still pending (no transcription and no failure)
+    pending_count = Utterance.objects.filter(
+        recording=recording, 
+        transcription__isnull=True, 
+        failure_data__isnull=True
+    ).count()
+    
+    if pending_count > 0:
+        logger.debug(f"Recording {recording.id} still has {pending_count} utterances in progress")
+        return
+    
+    # All utterances are done (either succeeded or failed)! Now update recording state.
+    failed_utterances = Utterance.objects.filter(recording=recording, failure_data__isnull=False)
+    
+    if failed_utterances.exists():
+        # Some utterances failed
+        failure_reasons = list(failed_utterances.filter(
+            failure_data__has_key="reason"
+        ).values_list("failure_data__reason", flat=True).distinct())
+        
+        logger.info(f"Recording {recording.id} has {failed_utterances.count()} failed utterances, marking transcription as failed")
+        try:
+            RecordingManager.set_recording_transcription_failed(recording, failure_data={"failure_reasons": failure_reasons})
+        except ValueError as e:
+            logger.warning(f"Could not set recording {recording.id} to failed: {e}")
+    else:
+        # All utterances succeeded!
+        logger.info(f"Recording {recording.id} all utterances complete, marking transcription as complete")
+        try:
+            RecordingManager.set_recording_transcription_complete(recording)
+        except ValueError as e:
+            # Another task may have already completed it - this is fine
+            logger.info(f"Could not set recording {recording.id} to complete (may already be complete): {e}")
+    
+    # If this is the default recording and bot is in POST_PROCESSING, mark post-processing complete
+    recording.refresh_from_db()
+    if recording.is_default_recording and recording.bot.state == BotStates.POST_PROCESSING:
+        logger.info(f"Bot {recording.bot.id} post-processing complete for recording {recording.id}")
+        BotEventManager.create_event(bot=recording.bot, event_type=BotEventTypes.POST_PROCESSING_COMPLETED)
 
 
 def get_transcription(utterance, recording):
@@ -77,6 +154,8 @@ def process_utterance(self, utterance_id):
                 utterance.failure_data = failure_data
                 utterance.save()
                 logger.info(f"Transcription failed for utterance {utterance_id}, failure data: {failure_data}")
+                # Check if all utterances are done after marking this one as failed
+                check_and_complete_recording(recording)
                 return
 
         utterance.audio_blob = b""  # set the audio blob binary field to empty byte string
@@ -93,9 +172,9 @@ def process_utterance(self, utterance_id):
                 payload=utterance_webhook_payload(utterance),
             )
 
-    # If the recording is in a terminal state and there are no more utterances to transcribe, set the recording's transcription state to complete
-    if RecordingManager.is_terminal_state(utterance.recording.state) and Utterance.objects.filter(recording=utterance.recording, transcription__isnull=True).count() == 0:
-        RecordingManager.set_recording_transcription_complete(utterance.recording)
+    # After processing this utterance, check if all utterances for this recording are complete
+    # This is non-blocking and fast - just a count check and state update if needed
+    check_and_complete_recording(recording)
 
 
 def get_transcription_via_gladia(utterance):

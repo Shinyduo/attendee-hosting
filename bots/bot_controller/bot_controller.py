@@ -78,6 +78,9 @@ logger = logging.getLogger(__name__)
 class BotController:
     # Default wait time for utterance termination (5 minutes)
     UTTERANCE_TERMINATION_WAIT_TIME_SECONDS = 300
+    # Defaults for pre-join watchdogs (can be overridden via env)
+    DEFAULT_JOINING_MAX_SECONDS = 600
+    DEFAULT_WAITING_ROOM_MAX_SECONDS = 600
 
     def per_participant_audio_input_manager(self):
         if self.bot_in_db.deepgram_use_streaming():
@@ -479,8 +482,9 @@ class BotController:
             self.save_debug_recording()
 
         if self.bot_in_db.state == BotStates.POST_PROCESSING:
-            self.wait_until_all_utterances_are_terminated()
-            BotEventManager.create_event(bot=self.bot_in_db, event_type=BotEventTypes.POST_PROCESSING_COMPLETED)
+            # Don't block waiting for utterances - let the process_utterance tasks handle completion
+            # They will call check_and_complete_recording() which will trigger POST_PROCESSING_COMPLETED
+            logger.info(f"Bot {self.bot_in_db.id} entering post-processing. Utterance tasks will handle completion asynchronously.")
 
         normal_quitting_process_worked = True
 
@@ -711,6 +715,19 @@ class BotController:
 
         self.bot_resource_snapshot_taker = BotResourceSnapshotTaker(self.bot_in_db)
 
+        # Pre-join watchdog state
+        self.join_started_at = None
+        self.waiting_room_entered_at = None
+        # Allow override via environment variables
+        try:
+            self.joining_max_seconds = int(os.getenv("BOT_JOINING_MAX_SECONDS", str(self.DEFAULT_JOINING_MAX_SECONDS)))
+        except Exception:
+            self.joining_max_seconds = self.DEFAULT_JOINING_MAX_SECONDS
+        try:
+            self.waiting_room_max_seconds = int(os.getenv("BOT_WAITING_ROOM_MAX_SECONDS", str(self.DEFAULT_WAITING_ROOM_MAX_SECONDS)))
+        except Exception:
+            self.waiting_room_max_seconds = self.DEFAULT_WAITING_ROOM_MAX_SECONDS
+
         # Create GLib main loop
         self.main_loop = GLib.MainLoop()
 
@@ -772,6 +789,8 @@ class BotController:
         if self.bot_in_db.state == BotStates.JOINING:
             logger.info("take_action_based_on_bot_in_db - JOINING")
             BotEventManager.set_requested_bot_action_taken_at(self.bot_in_db)
+            if self.join_started_at is None:
+                self.join_started_at = timezone.now()
             self.adapter.init()
         if self.bot_in_db.state == BotStates.LEAVING:
             logger.info("take_action_based_on_bot_in_db - LEAVING")
@@ -998,6 +1017,10 @@ class BotController:
                 self.take_action_based_on_bot_in_db()
                 self.first_timeout_call = False
 
+            # Pre-join watchdogs: cap time spent in JOINING / WAITING_ROOM
+            if not self.enforce_pre_join_watchdogs():
+                return False
+
             # Set heartbeat
             self.set_bot_heartbeat()
 
@@ -1047,6 +1070,49 @@ class BotController:
             logger.info("Traceback:")
             logger.info(traceback.format_exc())
         self.cleanup()
+
+    def enforce_pre_join_watchdogs(self) -> bool:
+        """
+        Enforce time caps before the bot fully joins a meeting.
+        Returns False if a watchdog fired (we also run cleanup), True otherwise.
+        """
+        now = timezone.now()
+
+        # Waiting room watchdog
+        if self.bot_in_db.state == BotStates.WAITING_ROOM and self.waiting_room_entered_at is not None:
+            elapsed = (now - self.waiting_room_entered_at).total_seconds()
+            if elapsed > self.waiting_room_max_seconds:
+                logger.info(
+                    f"Waiting room watchdog triggered for bot {self.bot_in_db.object_id}: elapsed={int(elapsed)}s > max={self.waiting_room_max_seconds}s"
+                )
+                try:
+                    BotEventManager.create_event(
+                        bot=self.bot_in_db,
+                        event_type=BotEventTypes.COULD_NOT_JOIN,
+                        event_sub_type=BotEventSubTypes.COULD_NOT_JOIN_MEETING_WAITING_ROOM_TIMEOUT_EXCEEDED,
+                    )
+                finally:
+                    self.cleanup()
+                return False
+
+        # JOINING watchdog
+        if self.bot_in_db.state == BotStates.JOINING and self.join_started_at is not None:
+            elapsed = (now - self.join_started_at).total_seconds()
+            if elapsed > self.joining_max_seconds:
+                logger.info(
+                    f"Joining watchdog triggered for bot {self.bot_in_db.object_id}: elapsed={int(elapsed)}s > max={self.joining_max_seconds}s"
+                )
+                try:
+                    BotEventManager.create_event(
+                        bot=self.bot_in_db,
+                        event_type=BotEventTypes.COULD_NOT_JOIN,
+                        event_sub_type=BotEventSubTypes.COULD_NOT_JOIN_UNABLE_TO_CONNECT_TO_MEETING,
+                    )
+                finally:
+                    self.cleanup()
+                return False
+
+        return True
 
     def get_recording_in_progress(self):
         return RecordingManager.get_recording_in_progress(self.bot_in_db)
@@ -1498,6 +1564,8 @@ class BotController:
 
         if message.get("message") == BotAdapter.Messages.BOT_PUT_IN_WAITING_ROOM:
             logger.info("Received message to put bot in waiting room")
+            if self.waiting_room_entered_at is None:
+                self.waiting_room_entered_at = timezone.now()
             BotEventManager.create_event(bot=self.bot_in_db, event_type=BotEventTypes.BOT_PUT_IN_WAITING_ROOM)
             return
 
@@ -1513,6 +1581,9 @@ class BotController:
                 return
 
             logger.info("Received message that bot joined meeting")
+            # Clear pre-join timers now that we've joined
+            self.join_started_at = None
+            self.waiting_room_entered_at = None
             BotEventManager.create_event(bot=self.bot_in_db, event_type=BotEventTypes.BOT_JOINED_MEETING)
             return
 

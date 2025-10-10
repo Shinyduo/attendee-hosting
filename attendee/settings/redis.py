@@ -25,3 +25,6 @@ CELERY_RESULT_BACKEND = REDIS_CELERY_URL
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"
+
+# Celery 6+ compatible startup retry flag to keep behavior consistent
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True

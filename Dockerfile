@@ -101,7 +101,8 @@ RUN apt-get update && apt-get install -y universal-ctags
 RUN apt-get update && apt-get install -y xterm
 
 # Install python dependencies
-RUN pip install pyjwt cython gdown deepgram-sdk python-dotenv
+# Pin deepgram-sdk to version 3.x which has DeepgramClientOptions
+RUN pip install pyjwt cython gdown "deepgram-sdk>=3.0.0,<4.0.0" python-dotenv
 
 # Install libavdevice-dev. Needed so that webpage streaming using pyav will work.
 RUN apt-get update && apt-get install -y libavdevice-dev && pip uninstall -y av && pip install --no-binary av "av==12.0.0"
